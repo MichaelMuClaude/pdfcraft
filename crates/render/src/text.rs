@@ -2125,6 +2125,27 @@ mod tests {
         assert!(t.find("quick absent").is_empty());
     }
 
+    /// #4469: a font's ToUnicode (or the Adobe Glyph List fallback for a glyph literally named
+    /// "fi") can give one glyph the precomposed ligature scalar U+FB01 instead of decomposing it
+    /// into "f" and "i" itself. Either way the page draws the same letters, so a search for
+    /// "office" must find it, and so must a search that itself types the ligature character.
+    #[test]
+    fn a_precomposed_ligature_matches_its_separate_letters() {
+        // "office": "of" as separate glyphs, the glyph named "fi" (Unicode U+FB01) next, then "ce".
+        let v = vec![
+            g("o", 10.0, 10.0, 16.0),
+            g("f", 16.0, 10.0, 22.0),
+            g("\u{fb01}", 22.0, 10.0, 28.0),
+            g("c", 28.0, 10.0, 34.0),
+            g("e", 34.0, 10.0, 40.0),
+        ];
+        let t = layout(v);
+        assert_eq!(t.plain_text(), "of\u{fb01}ce", "extraction keeps the ligature character as drawn");
+        assert_eq!(t.find("office"), vec![0..5], "a query spelled out finds the page's precomposed ligature");
+        assert_eq!(t.find("of\u{fb01}ce"), vec![0..5], "a query that itself uses the ligature still matches");
+        assert!(t.find("office!").is_empty(), "still no match for a query the page doesn't have");
+    }
+
     #[test]
     fn limited_search_stops_after_the_requested_matches() {
         let mut glyphs = Vec::new();

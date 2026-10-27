@@ -7,7 +7,16 @@ pub(super) fn find(page: &PageText, query: &str, sensitive: bool, whole_words: b
         return Vec::new();
     }
     let fold = |s: &str| if sensitive { s.to_owned() } else { fold_case(s) };
-    let needle: Vec<char> = fold(query).split_whitespace().collect::<Vec<_>>().join(" ").chars().collect();
+    let needle: Vec<char> = fold(query)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .flat_map(|c| {
+            let (letters, n) = unligature(c);
+            letters.into_iter().take(n)
+        })
+        .collect();
     if needle.is_empty() {
         return Vec::new();
     }
@@ -18,10 +27,13 @@ pub(super) fn find(page: &PageText, query: &str, sensitive: bool, whole_words: b
         if i > 0 && gap && chars.last().is_some_and(|c| c.0 != ' ') {
             chars.push((' ', i));
         }
-        for c in fold(&glyph.text).chars() {
-            let c = if c.is_whitespace() { ' ' } else { c };
-            if c != ' ' || chars.last().is_none_or(|last| last.0 != ' ') {
-                chars.push((c, i));
+        for raw in fold(&glyph.text).chars() {
+            let (letters, n) = unligature(raw);
+            for c in letters.into_iter().take(n) {
+                let c = if c.is_whitespace() { ' ' } else { c };
+                if c != ' ' || chars.last().is_none_or(|last| last.0 != ' ') {
+                    chars.push((c, i));
+                }
             }
         }
     }
@@ -66,6 +78,23 @@ pub(super) fn find(page: &PageText, query: &str, sensitive: bool, whole_words: b
         }
     }
     hits
+}
+
+/// `c`'s own letters, for the eight Latin ligatures a font's glyph name or ToUnicode CMap may map
+/// to a single precomposed scalar instead of the sequence ISO 32000-2 §9.10.3 gives as its own
+/// ToUnicode example (`U+0066 U+0069` for "fi"): the Adobe Glyph List does the same for a glyph
+/// literally named `fi` (#4469). A search must read the two forms as the same letters whichever
+/// one the page -- or the query -- happens to use. Anything else is just `c`, alone.
+fn unligature(c: char) -> ([char; 3], usize) {
+    match c {
+        '\u{fb00}' => (['f', 'f', ' '], 2),
+        '\u{fb01}' => (['f', 'i', ' '], 2),
+        '\u{fb02}' => (['f', 'l', ' '], 2),
+        '\u{fb03}' => (['f', 'f', 'i'], 3),
+        '\u{fb04}' => (['f', 'f', 'l'], 3),
+        '\u{fb05}' | '\u{fb06}' => (['s', 't', ' '], 2),
+        _ => ([c, ' ', ' '], 1),
+    }
 }
 
 /// Extend a prefix, falling back through strictly shorter proper prefixes on a mismatch.
