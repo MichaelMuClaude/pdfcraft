@@ -4795,6 +4795,12 @@ fn the_format_panel_toggles_superscript_and_subscript_on_selection() {
     assert_eq!(doc.can_undo(), Some("Edit text"));
     assert_eq!(doc.text_blocks(0)[0].text, "Page ¹");
 
+    // Select "¹" in "Page ¹" to toggle it back:
+    let ed = h.state_mut().views[0].line_editor.as_mut().unwrap();
+    ed.selection = Some(5..7);
+    ed.focus = true;
+    h.run_steps(1);
+
     // Click Superscript again: "¹" toggles back to "1"
     h.get_by_label("Superscript").click();
     h.run_steps(4);
