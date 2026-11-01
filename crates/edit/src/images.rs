@@ -547,88 +547,46 @@ pub(crate) fn is_entire_page_wrapped(ops: &[Op]) -> bool {
     depth == 0
 }
 
+/// The end (exclusive) of the sequence opened at `i`: just past the `close` that matches it,
+/// counting the nested `opens`, or `end` when it never closes.
+fn sequence_end(ops: &[Op], i: usize, end: usize, opens: &[&str], close: &str) -> usize {
+    let mut depth: usize = 1;
+    for (j, op) in ops.iter().enumerate().take(end).skip(i.saturating_add(1)) {
+        if opens.iter().any(|o| op.is(o)) {
+            depth = depth.saturating_add(1);
+        } else if op.is(close) {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return j.saturating_add(1);
+            }
+        }
+    }
+    end
+}
+
 pub(crate) fn content_units(ops: &[Op], scan_start: usize, scan_end: usize) -> Vec<std::ops::Range<usize>> {
     let mut units = Vec::new();
     let mut i = scan_start;
     while i < scan_end {
-        let op = match ops.get(i) {
-            Some(o) => o,
-            None => break,
-        };
-        if op.is("BDC") || op.is("BMC") {
+        let Some(op) = ops.get(i) else { break };
+        let j = if op.is("BDC") || op.is("BMC") {
             // A marked-content sequence is one unit up to its matching EMC (#3145), so Arrange moves
             // it whole and never inserts into another one: its content belongs to its tag (ISO 32000-2
             // § 14.6). An unbalanced sequence runs to the end of the scan.
-            let mut depth: usize = 1;
-            let mut j = i.saturating_add(1);
-            while j < scan_end {
-                if let Some(next) = ops.get(j) {
-                    if next.is("BDC") || next.is("BMC") {
-                        depth = depth.saturating_add(1);
-                    } else if next.is("EMC") {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            j = j.saturating_add(1);
-                            break;
-                        }
-                    }
-                }
-                j = j.saturating_add(1);
-            }
-            units.push(i..j);
-            i = j;
+            sequence_end(ops, i, scan_end, &["BDC", "BMC"], "EMC")
         } else if op.is("q") {
-            let mut depth: usize = 1;
-            let mut j = i.saturating_add(1);
-            while j < scan_end {
-                if let Some(next) = ops.get(j) {
-                    if next.is("q") {
-                        depth = depth.saturating_add(1);
-                    } else if next.is("Q") {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            j = j.saturating_add(1);
-                            break;
-                        }
-                    }
-                }
-                j = j.saturating_add(1);
-            }
-            units.push(i..j);
-            i = j;
+            sequence_end(ops, i, scan_end, &["q"], "Q")
         } else if op.is("BT") {
-            let mut j = i.saturating_add(1);
-            while j < scan_end {
-                if ops.get(j).is_some_and(|o| o.is("ET")) {
-                    j = j.saturating_add(1);
-                    break;
-                }
-                j = j.saturating_add(1);
-            }
-            units.push(i..j);
-            i = j;
+            sequence_end(ops, i, scan_end, &[], "ET")
         } else if op.is("BI") {
-            let mut j = i.saturating_add(1);
-            while j < scan_end {
-                if ops.get(j).is_some_and(|o| o.is("EI")) {
-                    j = j.saturating_add(1);
-                    break;
-                }
-                j = j.saturating_add(1);
-            }
-            units.push(i..j);
-            i = j;
+            sequence_end(ops, i, scan_end, &[], "EI")
         } else if op.is("Do") || op.is("sh") {
-            units.push(i..i.saturating_add(1));
-            i = i.saturating_add(1);
+            i.saturating_add(1)
         } else {
             let mut j = i;
             let mut found_end = false;
             while j < scan_end {
-                let next = match ops.get(j) {
-                    Some(o) => o,
-                    None => break,
-                };
+                let Some(next) = ops.get(j) else { break };
                 if matches!(next.op.as_slice(), b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"n") {
                     j = j.saturating_add(1);
                     found_end = true;
@@ -644,10 +602,10 @@ pub(crate) fn content_units(ops: &[Op], scan_start: usize, scan_end: usize) -> V
                 }
                 j = j.saturating_add(1);
             }
-            let u_end = if found_end { j } else { scan_end.max(i.saturating_add(1)) };
-            units.push(i..u_end);
-            i = u_end;
-        }
+            if found_end { j } else { scan_end.max(i.saturating_add(1)) }
+        };
+        units.push(i..j);
+        i = j;
     }
     units.retain(|u| {
         ops.get(u.clone()).is_some_and(|slice| {
@@ -778,17 +736,26 @@ impl ExtendedGStateTracker {
     }
 }
 
+/// The drawing-state operators besides colour that a moved unit restores, in the order it writes them.
+const DRAWING_PARAMS: [&str; 7] = ["w", "J", "j", "M", "d", "ri", "i"];
+
 #[derive(Clone, Default, Debug, PartialEq)]
 struct DrawingState {
     non_stroking_color: Option<Vec<Op>>,
     stroking_color: Option<Vec<Op>>,
-    line_width: Option<Op>,
-    line_cap: Option<Op>,
-    line_join: Option<Op>,
-    miter_limit: Option<Op>,
-    dash_pattern: Option<Op>,
-    rendering_intent: Option<Op>,
-    flatness: Option<Op>,
+    /// The last operator of each of [`DRAWING_PARAMS`].
+    params: [Option<Op>; 7],
+}
+
+/// `sc`/`scn` (or `SC`/`SCN`) after the colour space operator `space` keep that space.
+fn set_color(slot: &mut Option<Vec<Op>>, op: &Op, space: &str) {
+    match slot {
+        Some(ops) if ops.first().is_some_and(|o| o.is(space)) => {
+            ops.truncate(1);
+            ops.push(op.clone());
+        }
+        _ => *slot = Some(vec![op.clone()]),
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -811,224 +778,78 @@ impl DrawingStateTracker {
                     self.current = prev;
                 }
             }
-            b"g" | b"rg" | b"k" => {
-                self.current.non_stroking_color = Some(vec![op.clone()]);
-            }
-            b"cs" => {
-                self.current.non_stroking_color = Some(vec![op.clone()]);
-            }
-            b"sc" | b"scn" => {
-                if let Some(ref mut ops) = self.current.non_stroking_color {
-                    if ops.first().is_some_and(|o| o.is("cs")) {
-                        ops.truncate(1);
-                        ops.push(op.clone());
-                    } else {
-                        *ops = vec![op.clone()];
-                    }
-                } else {
-                    self.current.non_stroking_color = Some(vec![op.clone()]);
+            b"g" | b"rg" | b"k" | b"cs" => self.current.non_stroking_color = Some(vec![op.clone()]),
+            b"sc" | b"scn" => set_color(&mut self.current.non_stroking_color, op, "cs"),
+            b"G" | b"RG" | b"K" | b"CS" => self.current.stroking_color = Some(vec![op.clone()]),
+            b"SC" | b"SCN" => set_color(&mut self.current.stroking_color, op, "CS"),
+            _ => {
+                if let Some(slot) = DRAWING_PARAMS.iter().position(|p| op.is(p)).and_then(|k| self.current.params.get_mut(k)) {
+                    *slot = Some(op.clone());
                 }
             }
-            b"G" | b"RG" | b"K" => {
-                self.current.stroking_color = Some(vec![op.clone()]);
-            }
-            b"CS" => {
-                self.current.stroking_color = Some(vec![op.clone()]);
-            }
-            b"SC" | b"SCN" => {
-                if let Some(ref mut ops) = self.current.stroking_color {
-                    if ops.first().is_some_and(|o| o.is("CS")) {
-                        ops.truncate(1);
-                        ops.push(op.clone());
-                    } else {
-                        *ops = vec![op.clone()];
-                    }
-                } else {
-                    self.current.stroking_color = Some(vec![op.clone()]);
-                }
-            }
-            b"w" => {
-                self.current.line_width = Some(op.clone());
-            }
-            b"J" => {
-                self.current.line_cap = Some(op.clone());
-            }
-            b"j" => {
-                self.current.line_join = Some(op.clone());
-            }
-            b"M" => {
-                self.current.miter_limit = Some(op.clone());
-            }
-            b"d" => {
-                self.current.dash_pattern = Some(op.clone());
-            }
-            b"ri" => {
-                self.current.rendering_intent = Some(op.clone());
-            }
-            b"i" => {
-                self.current.flatness = Some(op.clone());
-            }
-            _ => {}
         }
         Ok(())
     }
 }
 
+/// The value a line-style parameter has when a page starts (ISO 32000-2 Table 51). The rendering
+/// intent and flatness have none to restore here.
+fn initial_param(name: &str) -> Option<Op> {
+    use pdfcraft_content::num;
+    let operands = match name {
+        "w" => vec![num(1.0)],
+        "J" | "j" => vec![num(0.0)],
+        "M" => vec![num(10.0)],
+        "d" => vec![Object::Array(vec![]), num(0.0)],
+        _ => return None,
+    };
+    Some(Op::new(name, operands))
+}
+
+/// The drawing state the image had at `source` that differs at `dest`, unless the moved unit's own
+/// state operators (`extracted_state_ops`) set it.
 fn compute_inherited_drawing_ops(source: &DrawingState, dest: &DrawingState, extracted_state_ops: &[Op]) -> Vec<Op> {
+    let sets = |names: &[&str]| extracted_state_ops.iter().any(|o| names.iter().any(|n| o.is(n)));
     let mut ops = Vec::new();
-
-    // 1. Non-stroking color
-    let has_non_stroking = extracted_state_ops.iter().any(|o| matches!(o.op.as_slice(), b"g" | b"rg" | b"k" | b"sc" | b"scn"));
-    if !has_non_stroking {
-        if let Some(ref color_ops) = source.non_stroking_color {
-            ops.extend(color_ops.iter().cloned());
-        } else if dest.non_stroking_color.is_some() {
-            ops.push(Op::new("g", vec![pdfcraft_content::num(0.0)]));
+    for (own, source, dest, black) in [
+        (sets(&["g", "rg", "k", "sc", "scn"]), &source.non_stroking_color, &dest.non_stroking_color, "g"),
+        (sets(&["G", "RG", "K", "SC", "SCN"]), &source.stroking_color, &dest.stroking_color, "G"),
+    ] {
+        match (own, source, dest) {
+            (true, _, _) | (false, None, None) => {}
+            (false, Some(color), _) => ops.extend(color.iter().cloned()),
+            (false, None, Some(_)) => ops.push(Op::new(black, vec![pdfcraft_content::num(0.0)])),
         }
     }
-
-    // 2. Stroking color
-    let has_stroking = extracted_state_ops.iter().any(|o| matches!(o.op.as_slice(), b"G" | b"RG" | b"K" | b"SC" | b"SCN"));
-    if !has_stroking {
-        if let Some(ref color_ops) = source.stroking_color {
-            ops.extend(color_ops.iter().cloned());
-        } else if dest.stroking_color.is_some() {
-            ops.push(Op::new("G", vec![pdfcraft_content::num(0.0)]));
+    for ((name, source), dest) in DRAWING_PARAMS.iter().zip(&source.params).zip(&dest.params) {
+        match (sets(&[name]), source, dest) {
+            (true, _, _) | (false, None, None) => {}
+            (false, Some(op), _) => ops.push(op.clone()),
+            (false, None, Some(_)) => ops.extend(initial_param(name)),
         }
     }
-
-    // 3. Line width
-    if !extracted_state_ops.iter().any(|o| o.is("w")) {
-        if let Some(ref op) = source.line_width {
-            ops.push(op.clone());
-        } else if dest.line_width.is_some() {
-            ops.push(Op::new("w", vec![pdfcraft_content::num(1.0)]));
-        }
-    }
-
-    // 4. Line cap
-    if !extracted_state_ops.iter().any(|o| o.is("J")) {
-        if let Some(ref op) = source.line_cap {
-            ops.push(op.clone());
-        } else if dest.line_cap.is_some() {
-            ops.push(Op::new("J", vec![pdfcraft_content::num(0.0)]));
-        }
-    }
-
-    // 5. Line join
-    if !extracted_state_ops.iter().any(|o| o.is("j")) {
-        if let Some(ref op) = source.line_join {
-            ops.push(op.clone());
-        } else if dest.line_join.is_some() {
-            ops.push(Op::new("j", vec![pdfcraft_content::num(0.0)]));
-        }
-    }
-
-    // 6. Miter limit
-    if !extracted_state_ops.iter().any(|o| o.is("M")) {
-        if let Some(ref op) = source.miter_limit {
-            ops.push(op.clone());
-        } else if dest.miter_limit.is_some() {
-            ops.push(Op::new("M", vec![pdfcraft_content::num(10.0)]));
-        }
-    }
-
-    // 7. Dash pattern
-    if !extracted_state_ops.iter().any(|o| o.is("d")) {
-        if let Some(ref op) = source.dash_pattern {
-            ops.push(op.clone());
-        } else if dest.dash_pattern.is_some() {
-            ops.push(Op::new("d", vec![Object::Array(vec![]), pdfcraft_content::num(0.0)]));
-        }
-    }
-
-    // 8. Rendering intent
-    if !extracted_state_ops.iter().any(|o| o.is("ri"))
-        && let Some(ref op) = source.rendering_intent
-    {
-        ops.push(op.clone());
-    }
-
-    // 9. Flatness
-    if !extracted_state_ops.iter().any(|o| o.is("i"))
-        && let Some(ref op) = source.flatness
-    {
-        ops.push(op.clone());
-    }
-
     ops
 }
 
-fn clip_path_to_ops(clip: &ClipPath) -> Vec<Op> {
+/// The operators that set `clip` again, in user space. [`ImageState`] builds clips only from
+/// finite points with `m`, `l`, `c` and `h`, so `None` (a quadratic segment) does not happen.
+fn clip_path_to_ops(clip: &ClipPath) -> Option<Vec<Op>> {
     let mut ops = Vec::new();
-    let mut current_pt = Point::ZERO;
     for el in clip.path.elements() {
-        match el {
-            kurbo::PathEl::MoveTo(p) => {
-                if !p.x.is_finite() || !p.y.is_finite() {
-                    return Vec::new();
-                }
-                current_pt = *p;
-                ops.push(Op::new("m", vec![pdfcraft_content::num(p.x), pdfcraft_content::num(p.y)]));
-            }
-            kurbo::PathEl::LineTo(p) => {
-                if !p.x.is_finite() || !p.y.is_finite() {
-                    return Vec::new();
-                }
-                current_pt = *p;
-                ops.push(Op::new("l", vec![pdfcraft_content::num(p.x), pdfcraft_content::num(p.y)]));
-            }
-            kurbo::PathEl::QuadTo(p1, p2) => {
-                if !p1.x.is_finite() || !p1.y.is_finite() || !p2.x.is_finite() || !p2.y.is_finite() {
-                    return Vec::new();
-                }
-                let c1_x = current_pt.x + (p1.x - current_pt.x) * (2.0 / 3.0);
-                let c1_y = current_pt.y + (p1.y - current_pt.y) * (2.0 / 3.0);
-                let c2_x = p2.x + (p1.x - p2.x) * (2.0 / 3.0);
-                let c2_y = p2.y + (p1.y - p2.y) * (2.0 / 3.0);
-                if !c1_x.is_finite() || !c1_y.is_finite() || !c2_x.is_finite() || !c2_y.is_finite() {
-                    return Vec::new();
-                }
-                current_pt = *p2;
-                ops.push(Op::new(
-                    "c",
-                    vec![
-                        pdfcraft_content::num(c1_x),
-                        pdfcraft_content::num(c1_y),
-                        pdfcraft_content::num(c2_x),
-                        pdfcraft_content::num(c2_y),
-                        pdfcraft_content::num(p2.x),
-                        pdfcraft_content::num(p2.y),
-                    ],
-                ));
-            }
-            kurbo::PathEl::CurveTo(p1, p2, p3) => {
-                if !p1.x.is_finite() || !p1.y.is_finite() || !p2.x.is_finite() || !p2.y.is_finite() || !p3.x.is_finite() || !p3.y.is_finite() {
-                    return Vec::new();
-                }
-                current_pt = *p3;
-                ops.push(Op::new(
-                    "c",
-                    vec![
-                        pdfcraft_content::num(p1.x),
-                        pdfcraft_content::num(p1.y),
-                        pdfcraft_content::num(p2.x),
-                        pdfcraft_content::num(p2.y),
-                        pdfcraft_content::num(p3.x),
-                        pdfcraft_content::num(p3.y),
-                    ],
-                ));
-            }
-            kurbo::PathEl::ClosePath => {
-                ops.push(Op::new("h", vec![]));
-            }
-        }
+        let (name, points) = match el {
+            kurbo::PathEl::MoveTo(p) => ("m", vec![*p]),
+            kurbo::PathEl::LineTo(p) => ("l", vec![*p]),
+            kurbo::PathEl::CurveTo(p1, p2, p3) => ("c", vec![*p1, *p2, *p3]),
+            kurbo::PathEl::ClosePath => ("h", Vec::new()),
+            kurbo::PathEl::QuadTo(..) => return None,
+        };
+        ops.push(Op::new(name, points.iter().flat_map(|p| [pdfcraft_content::num(p.x), pdfcraft_content::num(p.y)]).collect()));
     }
     if !ops.is_empty() {
         ops.push(Op::new(if clip.even_odd { "W*" } else { "W" }, vec![]));
         ops.push(Op::new("n", vec![]));
     }
-    ops
+    Some(ops)
 }
 
 pub(crate) fn extract_scope_state(ops: &[Op], start: usize, target: usize, initial_ctm: Matrix) -> Result<Option<ExtractedScopeState>, EditError> {
@@ -1131,7 +952,8 @@ pub(crate) fn extract_scope_state(ops: &[Op], start: usize, target: usize, initi
     Ok(Some(ExtractedScopeState { clip_ops, state_ops, do_op: target_op }))
 }
 
-/// Change the stacking order of image `index` on `page`.
+/// The unit `order` puts the image's unit `target_idx` next to, and whether after it. An image that
+/// shares its unit with other paint at the limit moves within that unit, past or behind the paint.
 fn target_destination_unit<'a>(
     units: &'a [std::ops::Range<usize>],
     target_idx: usize,
@@ -1139,83 +961,48 @@ fn target_destination_unit<'a>(
     order: ArrangeOrder,
     has_other_paint: bool,
 ) -> Result<(&'a std::ops::Range<usize>, bool), EditError> {
-    match order {
-        ArrangeOrder::BringToFront => {
-            if target_idx == units.len().saturating_sub(1) {
-                if has_other_paint { Ok((target_unit, true)) } else { Err(EditError::Invalid("the image is already in front".into())) }
-            } else {
-                let u = units.last().ok_or_else(|| EditError::Invalid("the image is already in front".into()))?;
-                Ok((u, true))
-            }
-        }
-        ArrangeOrder::SendToBack => {
-            if target_idx == 0 {
-                if has_other_paint { Ok((target_unit, false)) } else { Err(EditError::Invalid("the image is already at the back".into())) }
-            } else {
-                let u = units.first().ok_or_else(|| EditError::Invalid("the image is already at the back".into()))?;
-                Ok((u, false))
-            }
-        }
-        ArrangeOrder::BringForward => {
-            if target_idx == units.len().saturating_sub(1) {
-                if has_other_paint { Ok((target_unit, true)) } else { Err(EditError::Invalid("the image is already in front".into())) }
-            } else {
-                let u = units.get(target_idx.saturating_add(1)).ok_or_else(|| EditError::Invalid("the image is already in front".into()))?;
-                Ok((u, true))
-            }
-        }
-        ArrangeOrder::SendBackward => {
-            if target_idx == 0 {
-                if has_other_paint { Ok((target_unit, false)) } else { Err(EditError::Invalid("the image is already at the back".into())) }
-            } else {
-                let u = target_idx
-                    .checked_sub(1)
-                    .and_then(|i| units.get(i))
-                    .ok_or_else(|| EditError::Invalid("the image is already at the back".into()))?;
-                Ok((u, false))
-            }
-        }
+    let forward = matches!(order, ArrangeOrder::BringToFront | ArrangeOrder::BringForward);
+    let refused = || EditError::Invalid(if forward { "the image is already in front" } else { "the image is already at the back" }.into());
+    let at_limit = if forward { target_idx.saturating_add(1) >= units.len() } else { target_idx == 0 };
+    if at_limit {
+        return if has_other_paint { Ok((target_unit, forward)) } else { Err(refused()) };
     }
+    let dest = match order {
+        ArrangeOrder::BringToFront => units.last(),
+        ArrangeOrder::SendToBack => units.first(),
+        ArrangeOrder::BringForward => units.get(target_idx.saturating_add(1)),
+        ArrangeOrder::SendBackward => target_idx.checked_sub(1).and_then(|i| units.get(i)),
+    };
+    dest.map(|u| (u, forward)).ok_or_else(refused)
 }
 
+/// What Arrange takes out: the byte span, the op where the image's own scope state starts, and the
+/// ops `start..end` removed. That is the image's own `q … Q` scope inside its unit, else the `Do`
+/// alone when the unit paints something else too, else the whole unit.
 fn determine_arrange_spans(
     ops: &[Op],
     target: usize,
     target_unit: &std::ops::Range<usize>,
-    target_op: &Op,
     has_other_paint: bool,
     marked_unit: bool,
-) -> Option<(std::ops::Range<usize>, usize, usize, usize)> {
-    if has_other_paint {
-        if let Ok(Some((sub_start, sub_end, _))) = image_exclusive_scope(ops, target)
-            && sub_start >= target_unit.start
-            && sub_end < target_unit.end
-        {
-            let start_op = ops.get(sub_start).unwrap_or(target_op);
-            let end_op = ops.get(sub_end).unwrap_or(target_op);
-            Some((start_op.span.start..end_op.span.end, sub_start, sub_start, sub_end.saturating_add(1)))
-        } else {
-            Some((target_op.span.start..target_op.span.end, target, target, target.saturating_add(1)))
-        }
-    } else if let Ok(Some((sub_start, sub_end, _))) = image_exclusive_scope(ops, target)
-        && sub_start >= target_unit.start
-        && sub_end < target_unit.end
-        && !marked_unit
-    {
-        let start_op = ops.get(sub_start).unwrap_or(target_op);
-        let end_op = ops.get(sub_end).unwrap_or(target_op);
-        Some((start_op.span.start..end_op.span.end, sub_start, sub_start, sub_end.saturating_add(1)))
-    } else if marked_unit {
+) -> Result<(std::ops::Range<usize>, usize, usize, usize), EditError> {
+    let scope = image_scopes(ops, target, "arranged")
+        .ok()
+        .and_then(|s| s.isolated)
+        .filter(|&(start, end, _)| start >= target_unit.start && end < target_unit.end);
+    let unit_last = target_unit.end.saturating_sub(1);
+    let (first, scope_start, last) = match scope {
+        Some((start, end, _)) if has_other_paint || !marked_unit => (start, start, end),
+        _ if has_other_paint => (target, target, target),
         // A marked-content unit holding only this image moves whole, with its BDC…EMC.
         // The whole sequence is removed; the image's state is rebuilt from the ops inside it.
-        let first_op = ops.get(target_unit.start)?;
-        let last_op = target_unit.end.checked_sub(1).and_then(|i| ops.get(i))?;
-        Some((first_op.span.start..last_op.span.end, target_unit.start.saturating_add(1).min(target), target_unit.start, target_unit.end))
-    } else {
-        let first_op = ops.get(target_unit.start)?;
-        let last_op = target_unit.end.checked_sub(1).and_then(|i| ops.get(i))?;
-        Some((first_op.span.start..last_op.span.end, target_unit.start, target_unit.start, target_unit.end))
-    }
+        _ if marked_unit => (target_unit.start, target_unit.start.saturating_add(1).min(target), unit_last),
+        _ => (target_unit.start, target_unit.start, unit_last),
+    };
+    let missing = || EditError::Invalid("the image content unit could not be located".into());
+    let start = ops.get(first).ok_or_else(missing)?.span.start;
+    let end = ops.get(last).ok_or_else(missing)?.span.end;
+    Ok((start..end, scope_start, first, last.saturating_add(1)))
 }
 
 fn scan_leaking_ops(ops: &[Op], rem_start: usize, rem_end: usize) -> (Vec<Op>, bool) {
@@ -1329,26 +1116,25 @@ fn build_relocated_unit_ops(
     Ok(unit_ops)
 }
 
-/// Change the stacking order of image `index` on `page`.
-pub fn arrange_image(doc: &mut Document, page: usize, index: usize, order: ArrangeOrder) -> Result<(), EditError> {
-    let images = page_images(doc, page)?;
-    let img = images.get(index).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no image {}", page + 1, index + 1)))?;
-    let p = page_of(doc, page)?;
-    let all = content_streams(doc, &p.dict)?;
-    let pieces = pdfcraft_content::Pieces::join(&all.iter().map(|(_, data)| data.as_slice()).collect::<Vec<_>>());
+/// Change the stacking order of `img`, drawn on page `p` by its content streams `all`.
+fn arrange_image(
+    doc: &mut Document,
+    p: &pdfcraft_model::Page,
+    all: &[(Object, Vec<u8>)],
+    img: &PageImage,
+    order: ArrangeOrder,
+) -> Result<(), EditError> {
+    let pieces = joined(all);
     let ops = pieces.parse().ops;
     let target = img.op;
-    if !ops.get(target).is_some_and(|op| op.is("Do")) {
-        return Err(EditError::Invalid("the image operation could not be located".into()));
-    }
+    let target_op = ops.get(target).filter(|op| op.is("Do")).ok_or_else(|| EditError::Invalid("the image operation could not be located".into()))?;
 
     let is_wrapped = is_entire_page_wrapped(&ops);
     let (scan_start, scan_end) = if is_wrapped { (1, ops.len().saturating_sub(1)) } else { (0, ops.len()) };
     let units = content_units(&ops, scan_start, scan_end);
-    let Some(target_idx) = units.iter().position(|u| u.start <= target && target < u.end) else {
+    let Some((target_idx, target_unit)) = units.iter().enumerate().find(|(_, u)| u.contains(&target)) else {
         return Err(EditError::Invalid("the image content unit could not be located".into()));
     };
-    let Some(target_unit) = units.get(target_idx) else { return Ok(()) };
     let has_other_paint = ops.iter().enumerate().any(|(i, op)| {
         i >= target_unit.start
             && i < target_unit.end
@@ -1372,19 +1158,13 @@ pub fn arrange_image(doc: &mut Document, page: usize, index: usize, order: Arran
         return Err(EditError::Invalid("cannot rearrange an image that shares a marked-content sequence with other content".into()));
     }
 
-    let target_op = ops.get(target).ok_or_else(|| EditError::Invalid("the image operation could not be located".into()))?;
-    let Some((mut target_span, scope_start, rem_start, rem_end)) =
-        determine_arrange_spans(&ops, target, target_unit, target_op, has_other_paint, marked_unit)
-    else {
-        return Ok(());
-    };
+    let (mut target_span, scope_start, rem_start, rem_end) = determine_arrange_spans(&ops, target, target_unit, has_other_paint, marked_unit)?;
 
+    let missing = || EditError::Invalid("the destination content unit could not be located".into());
     let (dest_pos, scan_target) = if insert_after {
-        let Some(op) = dest_unit.end.checked_sub(1).and_then(|i| ops.get(i)) else { return Ok(()) };
-        (op.span.end, dest_unit.end)
+        (dest_unit.end.checked_sub(1).and_then(|i| ops.get(i)).ok_or_else(missing)?.span.end, dest_unit.end)
     } else {
-        let Some(op) = ops.get(dest_unit.start) else { return Ok(()) };
-        (op.span.start, dest_unit.start)
+        (ops.get(dest_unit.start).ok_or_else(missing)?.span.start, dest_unit.start)
     };
 
     let (leaking_ops, has_leaking_clip) = scan_leaking_ops(&ops, rem_start, rem_end);
@@ -1450,9 +1230,8 @@ pub fn arrange_image(doc: &mut Document, page: usize, index: usize, order: Arran
     let mut extracted = match extract_scope_state(&ops, scope_start, target, scope_start_ctm)? {
         Some(ext) => ext,
         None if scope_start != target => {
-            let target_op = ops.get(target).cloned().ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
             if !marked_unit || has_other_paint {
-                target_span = target_op.span.start..target_op.span.end;
+                target_span = target_op.span.clone();
             }
             extract_scope_state(&ops, target, target, Matrix(img.draw_matrix))?
                 .ok_or_else(|| EditError::Invalid("unsupported graphics state: unable to cleanly extract image scope state".into()))?
@@ -1480,12 +1259,11 @@ pub fn arrange_image(doc: &mut Document, page: usize, index: usize, order: Arran
         ));
     }
 
-    if all_clips && !img.clips.is_empty() {
+    if all_clips {
         for clip in &img.clips {
-            let ops = clip_path_to_ops(clip);
-            if !ops.is_empty() {
-                extracted.clip_ops.extend(ops);
-            }
+            let ops = clip_path_to_ops(clip)
+                .ok_or_else(|| EditError::Invalid("unsupported graphics state: the image clipping path cannot be cleanly preserved".into()))?;
+            extracted.clip_ops.extend(ops);
         }
     }
 
@@ -1550,15 +1328,42 @@ pub fn arrange_image(doc: &mut Document, page: usize, index: usize, order: Arran
     }
 
     let changed = pieces.splice(edits);
-    let contents = crate::text::rewritten_contents(doc, &all, changed);
+    let contents = crate::text::rewritten_contents(doc, all, changed);
     doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), contents))?;
     Ok(())
 }
 
-/// Locate the innermost graphics state scope enclosing only `target` (with no other painting operations).
-/// Returns `Some((start, end, scope_matrix))` where `start` is the index of `q`, `end` is the index of `Q`,
-/// and `scope_matrix` is the CTM in effect immediately before entering that `q`.
-fn image_exclusive_scope(ops: &[Op], target: usize) -> Result<Option<(usize, usize, Matrix)>, EditError> {
+/// The saved graphics-state scopes (`q … Q`) around the `Do` at `target` that paint nothing else,
+/// each as `(q, Q, CTM before the q)`.
+struct ImageScopes {
+    /// The innermost one inside which every clip on the image is set.
+    isolated: Option<(usize, usize, Matrix)>,
+    /// The outermost one. It holds all of the image's private clips, but not a clip set outside it.
+    outermost: Option<(usize, usize, Matrix)>,
+    /// The CTM at the `Do`, and whether a clip applies there.
+    placement: Matrix,
+    clipped: bool,
+}
+
+impl ImageScopes {
+    /// The saved graphics-state scope containing just this image and its crop, or the `Do` alone
+    /// when nothing clips it. Applying a transform before that scope moves the actual clipping path
+    /// as well as the pixels. A shared clip must never be moved along with unrelated artwork or text.
+    ///
+    /// Under a clip set outside every scope that holds only this image (a report or table drawing
+    /// each picture as `q re W n cm Do Q` inside a section's clip), no scope contains every active
+    /// clip. The outermost scope holding only the image is used then: it contains all of the
+    /// image's private clips, which move with it, while the outer clip is shared and stays.
+    fn transform_scope(&self, target: usize) -> Option<(usize, usize, Matrix)> {
+        if !self.clipped {
+            return Some((target, target, self.placement));
+        }
+        self.isolated.or(self.outermost)
+    }
+}
+
+/// [`ImageScopes`] of the `Do` at `target`. An image inside a text object cannot be `done`.
+fn image_scopes(ops: &[Op], target: usize, done: &str) -> Result<ImageScopes, EditError> {
     struct Scope {
         start: usize,
         matrix: Matrix,
@@ -1575,6 +1380,7 @@ fn image_exclusive_scope(ops: &[Op], target: usize) -> Result<Option<(usize, usi
     let mut text = false;
     let mut at_image = None;
     let mut isolated = None;
+    let mut outermost = None;
     for (index, op) in ops.iter().enumerate() {
         match op.op.as_slice() {
             b"q" => {
@@ -1585,8 +1391,13 @@ fn image_exclusive_scope(ops: &[Op], target: usize) -> Result<Option<(usize, usi
             }
             b"Q" => {
                 if let Some(scope) = stack.pop() {
-                    if scope.selected && !scope.other_paint && !scope.inherited_clip && !scope.inherited_path {
-                        isolated.get_or_insert((scope.start, index, scope.matrix));
+                    if scope.selected && !scope.other_paint && !scope.inherited_path {
+                        let found = (scope.start, index, scope.matrix);
+                        if !scope.inherited_clip {
+                            isolated.get_or_insert(found);
+                        }
+                        // Scopes close inner first, so the last one recorded is the outermost.
+                        outermost = Some(found);
                     }
                     matrix = scope.matrix;
                     clipped = scope.inherited_clip;
@@ -1607,9 +1418,9 @@ fn image_exclusive_scope(ops: &[Op], target: usize) -> Result<Option<(usize, usi
         }
         if index == target {
             if text {
-                return Err(EditError::Invalid("an image inside a text object cannot be cropped".into()));
+                return Err(EditError::Invalid(format!("an image inside a text object cannot be {done}")));
             }
-            at_image = Some(matrix);
+            at_image = Some((matrix, clipped));
             for scope in &mut stack {
                 scope.selected = true;
             }
@@ -1627,10 +1438,8 @@ fn image_exclusive_scope(ops: &[Op], target: usize) -> Result<Option<(usize, usi
             path = false;
         }
     }
-    if at_image.is_none() {
-        return Err(EditError::Invalid("the image operation is missing".into()));
-    }
-    Ok(isolated)
+    let (placement, clipped) = at_image.ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
+    Ok(ImageScopes { isolated, outermost, placement, clipped })
 }
 
 /// The scope `start..=end` without its private clipping paths and clipping `W n` sequences.
@@ -1658,19 +1467,15 @@ fn extract_image_drawing_ops(ops: &[Op], start: usize, end: usize) -> Result<(Ve
     Ok((drawing, removed_clip))
 }
 
-/// Remove any private clipping path / crop on image `index` on `page`.
-pub fn remove_image_crop(doc: &mut Document, page: usize, index: usize) -> Result<(), EditError> {
-    let images = page_images(doc, page)?;
-    let img = images.get(index).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no image {}", page + 1, index + 1)))?;
-    let p = page_of(doc, page)?;
-    let all = content_streams(doc, &p.dict)?;
-    let pieces = pdfcraft_content::Pieces::join(&all.iter().map(|(_, data)| data.as_slice()).collect::<Vec<_>>());
+/// Remove any private clipping path / crop on `img`, drawn on page `p` by its content streams `all`.
+fn remove_image_crop(doc: &mut Document, p: &pdfcraft_model::Page, all: &[(Object, Vec<u8>)], img: &PageImage) -> Result<(), EditError> {
+    let pieces = joined(all);
     let ops = pieces.parse().ops;
     let target = img.op;
     if !ops.get(target).is_some_and(|op| op.is("Do")) {
         return Err(EditError::Invalid("the image operation could not be located".into()));
     }
-    let Some((start, end, _)) = image_exclusive_scope(&ops, target)? else {
+    let Some((start, end, _)) = image_scopes(&ops, target, "cropped")?.isolated else {
         return Err(EditError::Invalid("the image has no crop to remove".into()));
     };
     let (drawing_ops, removed_clip) = extract_image_drawing_ops(&ops, start, end)?;
@@ -1686,7 +1491,7 @@ pub fn remove_image_crop(doc: &mut Document, page: usize, index: usize) -> Resul
     unit_ops.push(Op::new("Q", vec![]));
     let serialized = serialize_ops(&unit_ops);
     let changed = pieces.splice([(range, serialized)]);
-    let contents = crate::text::rewritten_contents(doc, &all, changed);
+    let contents = crate::text::rewritten_contents(doc, all, changed);
     doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), contents))?;
     Ok(())
 }
@@ -1709,10 +1514,10 @@ pub fn change_image(doc: &mut Document, page: usize, index: usize, change: &Imag
             return transform_image(doc, &p, &all, &img, *t);
         }
         ImageChange::Arrange(order) => {
-            return arrange_image(doc, page, index, *order);
+            return arrange_image(doc, &p, &all, &img, *order);
         }
         ImageChange::RemoveCrop => {
-            return remove_image_crop(doc, page, index);
+            return remove_image_crop(doc, &p, &all, &img);
         }
         ImageChange::Crop(keep) => {
             return crop_image_impl(doc, &p, &all, &img, *keep);
@@ -1758,94 +1563,6 @@ pub(crate) fn selectable_images(
         .collect())
 }
 
-/// Find the saved graphics-state scope containing just this image and its crop. Applying
-/// the transform before that scope moves the actual clipping path as well as the pixels.
-/// A shared clip must never be moved along with unrelated artwork or text.
-///
-/// Under a clip set outside every scope that holds only this image (a report or table drawing
-/// each picture as `q re W n cm Do Q` inside a section's clip), no scope contains every active
-/// clip. The outermost scope holding only the image is used then: it contains all of the
-/// image's private clips, which move with it, while the outer clip is shared and stays.
-fn image_transform_scope(ops: &[Op], target: usize) -> Result<Option<(usize, usize, Matrix)>, EditError> {
-    struct Scope {
-        start: usize,
-        matrix: Matrix,
-        inherited_clip: bool,
-        inherited_path: bool,
-        selected: bool,
-        other_paint: bool,
-    }
-    let mut stack: Vec<Scope> = Vec::new();
-    let mut matrix = Matrix::IDENTITY;
-    let mut clipped = false;
-    let mut path = false;
-    let mut pending_clip = false;
-    let mut text = false;
-    let mut at_image = None;
-    let mut isolated = None;
-    let mut outermost = None;
-    for (index, op) in ops.iter().enumerate() {
-        match op.op.as_slice() {
-            b"q" => {
-                if stack.len() >= 256 {
-                    return Err(EditError::Invalid("the image graphics state is too deeply nested to transform".into()));
-                }
-                stack.push(Scope { start: index, matrix, inherited_clip: clipped, inherited_path: path, selected: false, other_paint: false });
-            }
-            b"Q" => {
-                if let Some(scope) = stack.pop() {
-                    if scope.selected && !scope.other_paint && !scope.inherited_path {
-                        if !scope.inherited_clip {
-                            // Prefer the innermost scope that contains every active clipping path.
-                            isolated.get_or_insert((scope.start, index, scope.matrix));
-                        }
-                        // Scopes close inner first, so the last one recorded is the outermost.
-                        outermost = Some((scope.start, index, scope.matrix));
-                    }
-                    matrix = scope.matrix;
-                    clipped = scope.inherited_clip;
-                }
-            }
-            b"cm" => {
-                if let Some(m) = op.nums::<6>() {
-                    matrix = Matrix(m).then(&matrix);
-                }
-            }
-            b"BT" => text = true,
-            b"ET" => text = false,
-            b"m" | b"l" | b"c" | b"v" | b"y" | b"re" => path = true,
-            b"W" | b"W*" => pending_clip = true,
-            _ => {}
-        }
-        if index == target {
-            if text {
-                return Err(EditError::Invalid("an image inside a text object cannot be transformed".into()));
-            }
-            at_image = Some((matrix, clipped));
-            for scope in &mut stack {
-                scope.selected = true;
-            }
-        } else if matches!(
-            op.op.as_slice(),
-            b"Do" | b"Tj" | b"TJ" | b"'" | b"\"" | b"sh" | b"BI" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*"
-        ) {
-            for scope in &mut stack {
-                scope.other_paint = true;
-            }
-        }
-        if matches!(op.op.as_slice(), b"n" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*") {
-            clipped |= pending_clip;
-            pending_clip = false;
-            path = false;
-        }
-    }
-    let (placement, clipped) = at_image.ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
-    if !clipped {
-        return Ok(Some((target, target, placement)));
-    }
-    Ok(isolated.or(outermost))
-}
-
 fn transform_image(
     doc: &mut Document,
     page: &pdfcraft_model::Page,
@@ -1864,7 +1581,8 @@ fn transform_image(
     }
     // A private path crop moves with its image regardless of intervening state operators.
     // Shared crops retain the existing fixed-clip behavior, preserving neighbouring paint.
-    let (start, end, placement) = image_transform_scope(&ops, target)?.unwrap_or((target, target, Matrix(image.draw_matrix)));
+    let (start, end, placement) =
+        image_scopes(&ops, target, "transformed")?.transform_scope(target).unwrap_or((target, target, Matrix(image.draw_matrix)));
     let inverse = placement.invert().ok_or_else(|| EditError::Invalid("the image has no area".into()))?;
     let local = placement.then(&Matrix(transform)).then(&inverse);
     if !local.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
@@ -1938,7 +1656,8 @@ fn crop_image_impl(
     if !ops.get(target).is_some_and(|op| op.is("Do")) {
         return Err(EditError::Invalid("the image operation could not be located".into()));
     }
-    let (start, end, placement) = image_transform_scope(&ops, target)?.unwrap_or((target, target, Matrix(image.draw_matrix)));
+    let (start, end, placement) =
+        image_scopes(&ops, target, "cropped")?.transform_scope(target).unwrap_or((target, target, Matrix(image.draw_matrix)));
     let inverse = placement.invert().ok_or_else(|| EditError::Invalid("the image has no area".into()))?;
     let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].map(|(x, y)| inverse.apply(x, y));
     if !corners.iter().all(|(x, y)| x.is_finite() && y.is_finite() && x.abs() <= 1e12 && y.abs() <= 1e12) {
