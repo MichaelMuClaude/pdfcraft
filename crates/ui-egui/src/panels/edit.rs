@@ -280,6 +280,9 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             Fonts { sources: Some(&sources), shown, mixed_size },
             Some(paragraphs),
         );
+        if out.size_committed {
+            ed.choose_size(ed.look.size);
+        }
         let mut changed = out.changed;
         if let Some(script) = out.script {
             changed |= crate::edit_text_ui::toggle_script(&mut ed.text, &mut ed.selection, script);

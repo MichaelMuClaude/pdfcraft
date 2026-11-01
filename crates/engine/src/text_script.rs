@@ -27,7 +27,7 @@ const SUPERSCRIPT: &[(char, char)] = &[
     ('8', '⁸'),
     ('9', '⁹'),
     ('+', '⁺'),
-    ('-', '⁻'),
+    ('−', '⁻'),
     ('=', '⁼'),
     ('(', '⁽'),
     (')', '⁾'),
@@ -90,7 +90,7 @@ const SUBSCRIPT: &[(char, char)] = &[
     ('8', '₈'),
     ('9', '₉'),
     ('+', '₊'),
-    ('-', '₋'),
+    ('−', '₋'),
     ('=', '₌'),
     ('(', '₍'),
     (')', '₎'),
@@ -121,10 +121,9 @@ impl Script {
         }
     }
 
-    /// `c` raised or lowered, or `None` when Unicode has no such form for it. The minus sign
-    /// (U+2212) takes the hyphen-minus's form.
+    /// `c` raised or lowered, or `None` when Unicode has no distinct reversible form for it.
+    /// Mathematical minus U+2212 has a form; ASCII hyphen-minus stays unchanged to avoid a lossy collision.
     pub fn form(self, c: char) -> Option<char> {
-        let c = if c == '−' { '-' } else { c };
         self.pairs().iter().find(|(plain, _)| *plain == c).map(|&(_, form)| form)
     }
 
@@ -195,9 +194,17 @@ mod tests {
                 assert_eq!(toggle(&raised, None, script).unwrap().0, s, "{script:?} {plain}");
             }
         }
-        // The minus sign takes the hyphen's form.
-        assert_eq!(toggle("−", None, Script::Super).unwrap().0, "⁻");
-        assert_eq!(toggle("−", None, Script::Sub).unwrap().0, "₋");
+        assert_eq!(toggle("-", None, Script::Super), None);
+        assert_eq!(toggle("-", None, Script::Sub), None);
+    }
+
+    #[test]
+    fn review_script_round_trips_preserve_both_minus_characters() {
+        for script in [Script::Super, Script::Sub] {
+            let text = "−2 -3";
+            let once = toggle(text, None, script).unwrap().0;
+            assert_eq!(toggle(&once, None, script).unwrap().0, text);
+        }
     }
 
     #[test]

@@ -87,6 +87,7 @@ impl Paragraphs<'_> {
 #[derive(Default)]
 pub(crate) struct Outcome {
     pub changed: bool,
+    pub size_committed: bool,
     pub font: Option<FontChoice>,
     /// Superscript or Subscript was clicked, for the selected paragraphs' text.
     pub script: Option<Script>,
@@ -366,6 +367,7 @@ pub(crate) fn panel(
         number_with_presets(ui, spacing, &CHAR_SPACINGS, half, (label.id, tl!("Character spacing")));
     });
 
+    out.size_committed = size_committed;
     out.changed = out.changed || size_committed || (look.clone(), extras.as_deref().copied()) != before;
     ui.add_space(6.0);
     ui.separator();

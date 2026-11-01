@@ -50,6 +50,9 @@ pub(crate) const MAX_OUTLINES: usize = 250;
 /// of it without one ([`pdfcraft_engine::text_script::toggle`]). A selection follows the
 /// converted characters. Whether the text changed.
 pub(crate) fn toggle_script(text: &mut String, selection: &mut Option<std::ops::Range<usize>>, script: pdfcraft_engine::text_script::Script) -> bool {
+    if selection.as_ref().is_some_and(|r| r.is_empty()) {
+        *selection = None;
+    }
     let Some((toggled, range)) = pdfcraft_engine::text_script::toggle(text, selection.as_ref(), script) else { return false };
     *text = toggled;
     if selection.is_some() {
@@ -92,6 +95,7 @@ pub struct LineEditor {
     /// (Calibri reads as Helvetica) can be the one picked, so comparing `look` with `look0` alone
     /// would miss the choice.
     family_chosen: bool,
+    size_chosen: bool,
     /// Underline, line spacing (× size; 0 = the paragraph's own), character spacing (pt) and
     /// horizontal scale (%), and what they were.
     pub extras: Extras,
@@ -265,7 +269,7 @@ impl LineEditor {
 
     /// Whether the paragraph with `text` in it differs from what was opened.
     fn changes_with(&self, text: &str) -> bool {
-        text != self.original || self.look != self.look0 || self.extras != self.extras0 || self.family_chosen
+        text != self.original || self.look != self.look0 || self.extras != self.extras0 || self.family_chosen || self.size_chosen
     }
 
     /// Extra width permitted by the editor. Source containers now remain fixed.
@@ -284,7 +288,7 @@ impl LineEditor {
         let mut style = pdfcraft_engine::BlockStyle {
             resource: self.font_resource.clone(),
             family: (l.family != o.family || self.family_chosen || l.bold != o.bold || l.italic != o.italic).then_some((l.family, l.bold, l.italic)),
-            size: (l.size != o.size).then_some(l.size),
+            size: (self.size_chosen || l.size != o.size).then_some(l.size),
             color: (l.color != o.color).then_some(l.color),
             // The whole paragraph's alignment when it was picked, or when the rows' own were
             // dropped for it (the rows are where those put them, so leaving it out keeps them there).
@@ -325,9 +329,16 @@ impl LineEditor {
         style
     }
 
-    /// After applying formatting: the paragraph now has it. The selection stays, as the box still
-    /// shows it, so a second alignment or format picked for it applies to the same rows.
+    /// An explicit size commit also normalizes a mixed selection to the displayed value.
+    pub(crate) fn choose_size(&mut self, size: f64) {
+        self.look.size = size;
+        self.size_chosen = true;
+    }
+
+    /// After applying formatting: the paragraph now has it. Its old byte selection is cleared;
+    /// the rewritten paragraph may have different text or geometry.
     pub fn applied(&mut self) {
+        self.size_chosen = false;
         self.font_resource = None;
         self.family_chosen = false;
         self.look0 = self.look.clone();
@@ -640,6 +651,7 @@ fn open_editor(cx: PageToolContext<'_>, lines: &[pdfcraft_engine::TextBlock], bo
         look: look_of(l),
         look0: look_of(l),
         family_chosen: false,
+        size_chosen: false,
         extras: Extras::default(),
         extras0: Extras::default(),
         typing_from: None,
@@ -1189,11 +1201,36 @@ C", &picked
             look: look_of(&block),
             look0: look_of(&block),
             family_chosen: false,
+            size_chosen: false,
             extras: Extras::default(),
             extras0: Extras::default(),
             typing_from: None,
         };
         (app, ed)
+    }
+
+    #[test]
+    fn review_committing_the_shown_size_applies_it_to_a_mixed_selection() {
+        let (_app, mut ed) = preview_app();
+        ed.selection = Some(0..2);
+        let mut fmt = ed.current_formatting(&[]);
+        fmt.size = None;
+        ed.sync_selection_look(&fmt);
+        let shown = ed.look.size;
+        ed.choose_size(shown);
+        assert!(ed.has_changes());
+        assert_eq!(ed.style().ranges[0].size, Some(shown));
+        ed.applied();
+        assert!(ed.style().ranges.is_empty());
+    }
+
+    #[test]
+    fn review_a_caret_only_script_formats_the_whole_draft() {
+        let mut text = "x2".to_string();
+        let mut caret = Some(1..1);
+        assert!(toggle_script(&mut text, &mut caret, pdfcraft_engine::text_script::Script::Super));
+        assert_eq!(text, "ˣ²");
+        assert_eq!(caret, None);
     }
 
     #[test]
@@ -1389,6 +1426,7 @@ C", &picked
             multiline: false,
             size: 12.0,
             family_chosen: false,
+            size_chosen: false,
             focus: true,
             had_focus: false,
             look: pdfcraft_engine::AddedText::default(),
