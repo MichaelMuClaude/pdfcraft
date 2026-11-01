@@ -64,11 +64,7 @@ impl PdfCraftApp {
         if paste {
             let has_override_image = matches!(self.clipboard_override, Some(crate::create_ui::Clip::Image { .. }));
             #[cfg(not(target_arch = "wasm32"))]
-            let system_has_text = if !has_override_image && self.system_clipboard {
-                crate::os_clipboard::with(|cb| cb.get_text()).map(|t| !t.is_empty()).unwrap_or(false)
-            } else {
-                false
-            };
+            let system_has_text = if !has_override_image && self.system_clipboard { crate::os_clipboard::has_text() } else { false };
             #[cfg(target_arch = "wasm32")]
             let system_has_text = false;
 

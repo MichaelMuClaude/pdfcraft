@@ -272,7 +272,8 @@ fn typing_moving_styling_and_deleting_added_content() {
 #[test]
 fn a_picture_on_the_clipboard_is_pasted_onto_the_page() {
     use pdfcraft_ui_egui::Clip;
-    let mut h = harness();
+    // Three frames between modifier releases represent a short real key gesture.
+    let mut h = harness_with_step_dt(1.0 / 60.0);
     let v = |pressed, modifiers| egui::Event::Key { key: egui::Key::V, physical_key: None, pressed, repeat: false, modifiers };
     let images = |h: &Harness<'static, PdfCraftApp>| added(h).iter().filter(|a| matches!(a.content, pdfcraft_engine::AddedContent::Image(_))).count();
     // Text on the clipboard: egui gets a Paste event instead of the press; nothing lands on the page.

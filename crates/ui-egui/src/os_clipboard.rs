@@ -16,3 +16,13 @@ pub(crate) fn with<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboa
     let mut clipboard = arboard::Clipboard::new()?;
     f(&mut clipboard)
 }
+
+/// Nonempty text supersedes the app's cached image, even if another clipboard format also exists.
+pub(crate) fn has_text() -> bool {
+    with(|cb| cb.get_text()).is_ok_and(|text| !text.is_empty())
+}
+
+/// The system clipboard as image paste sees it; text takes precedence over a cached image.
+pub(crate) fn for_image_paste() -> Option<crate::create_ui::Clip> {
+    if has_text() { Some(crate::create_ui::Clip::Text(String::new())) } else { crate::create_ui::read_clipboard() }
+}

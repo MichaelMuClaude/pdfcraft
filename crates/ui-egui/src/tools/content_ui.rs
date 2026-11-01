@@ -1046,9 +1046,7 @@ impl crate::PdfCraftApp {
                     if modifiers.command {
                         self.last_command_frame = Some((self.frame_count, inp.time));
                     }
-                    let command_recent = self
-                        .last_command_frame
-                        .is_some_and(|(f, t)| self.frame_count.saturating_sub(f) <= 10 || (inp.time > 0.0 && (inp.time - t).abs() < 0.35));
+                    let command_recent = self.last_command_frame.is_some_and(|(_, t)| inp.time >= t && inp.time - t < 0.35);
                     let command_active = modifiers.command || command_recent;
                     if !*pressed && !self.v_pressed && command_active {
                         released = true;
@@ -1071,9 +1069,10 @@ impl crate::PdfCraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.system_clipboard {
-                let has_img = crate::os_clipboard::with(|cb| cb.get_image()).is_ok();
-                if has_img {
-                    return true;
+                match crate::os_clipboard::for_image_paste() {
+                    Some(crate::create_ui::Clip::Image { .. }) => return true,
+                    Some(crate::create_ui::Clip::Text(_)) => return false,
+                    None => {}
                 }
             }
         }
@@ -1091,6 +1090,14 @@ impl crate::PdfCraftApp {
     }
 
     fn paste_image_internal(&mut self, page: usize, rect: Option<[f64; 4]>, at: Option<[f64; 2]>) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let system = if self.clipboard_override.is_none() && self.system_clipboard { crate::os_clipboard::for_image_paste() } else { None };
+        #[cfg(target_arch = "wasm32")]
+        let system = None;
+        self.paste_image_with_system(page, rect, at, system)
+    }
+
+    fn paste_image_with_system(&mut self, page: usize, rect: Option<[f64; 4]>, at: Option<[f64; 2]>, system: Option<crate::create_ui::Clip>) -> bool {
         let Some((i, id)) = self.active_ids() else {
             return false;
         };
@@ -1116,27 +1123,17 @@ impl crate::PdfCraftApp {
             }
             Some(crate::create_ui::Clip::Text(_)) => None,
             None => {
-                #[cfg(not(target_arch = "wasm32"))]
-                let sys_result = if self.system_clipboard {
-                    crate::os_clipboard::with(|cb| cb.get_image()).ok().and_then(|img| {
-                        let expected = img.width.checked_mul(img.height).and_then(|p| p.checked_mul(4));
-                        if img.width > 0
-                            && img.height > 0
-                            && img.width <= crate::create_ui::MAX_IMAGE_SIDE
-                            && img.height <= crate::create_ui::MAX_IMAGE_SIDE
-                            && expected == Some(img.bytes.len())
-                            && img.bytes.len() <= crate::create_ui::MAX_IMAGE_BYTES
-                        {
-                            Some((img.width, img.height, img.bytes.into_owned()))
-                        } else {
-                            None
-                        }
-                    })
-                } else {
-                    None
+                if matches!(system, Some(crate::create_ui::Clip::Text(_))) {
+                    self.last_copied_image = None;
+                    self.last_copied_file = None;
+                    self.last_copied_image_rect = None;
+                    self.notify_tr("No image on clipboard to paste");
+                    return false;
+                }
+                let sys_result = match system {
+                    Some(crate::create_ui::Clip::Image { width, height, rgba }) => Some((width, height, rgba)),
+                    _ => None,
                 };
-                #[cfg(target_arch = "wasm32")]
-                let sys_result: Option<(usize, usize, Vec<u8>)> = None;
 
                 if let Some((img_width, img_height, img_bytes)) = sys_result {
                     let is_same_as_last = self
@@ -1323,6 +1320,45 @@ mod tests {
     use egui_kittest::kittest::Queryable;
 
     use super::*;
+
+    #[test]
+    fn system_text_prevents_context_menu_paste_of_a_cached_image() {
+        let mut app = crate::PdfCraftApp::new();
+        app.system_clipboard = false;
+        app.create_blank();
+        let id = app.active_ids().unwrap().1;
+        app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
+        let undo = app.session.get(id).unwrap().can_undo().map(str::to_owned);
+        assert!(!app.paste_image_with_system(0, None, Some([20.0, 20.0]), Some(crate::create_ui::Clip::Text("new text".into()))));
+        assert_eq!(app.session.get(id).unwrap().can_undo().map(str::to_owned), undo);
+        assert!(app.session.get(id).unwrap().page_images(0).is_empty());
+        assert!(app.last_copied_image.is_none());
+    }
+
+    #[test]
+    fn a_plain_v_release_long_after_command_is_not_a_paste() {
+        let mut app = crate::PdfCraftApp::new();
+        let ctx = egui::Context::default();
+        app.frame_count = 1;
+        app.last_command_frame = Some((1, 1.0));
+        ctx.run_ui(
+            egui::RawInput {
+                time: Some(10.0),
+                events: vec![egui::Event::Key {
+                    key: egui::Key::V,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                assert!(!app.paste_key_released(ui.ctx()), "elapsed time expires command even if no frames were drawn");
+            },
+        )
+        .drop_without_applying_deltas();
+    }
 
     /// The image a flip button leaves behind, as the panel returns it.
     fn flipped(tooltip: &str) -> pdfcraft_engine::AddedImage {
