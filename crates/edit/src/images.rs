@@ -83,6 +83,7 @@ impl PageImage {
 struct ClipPath {
     path: Arc<BezPath>,
     even_odd: bool,
+    app_crop: bool,
 }
 
 /// Image draws one page's inventory lists at most: a form drawn many times from other forms
@@ -128,11 +129,19 @@ struct ImageState {
     path: BezPath,
     subpath_start: Option<Point>,
     pending_clip: Option<bool>,
+    app_crop: bool,
 }
 
 impl ImageState {
     fn new(matrix: Matrix, clip: [f64; 4], clips: Vec<ClipPath>) -> Self {
-        Self { placement: Placement { matrix, clip, clips }, stack: Vec::new(), path: BezPath::new(), subpath_start: None, pending_clip: None }
+        Self {
+            placement: Placement { matrix, clip, clips },
+            stack: Vec::new(),
+            path: BezPath::new(),
+            subpath_start: None,
+            pending_clip: None,
+            app_crop: false,
+        }
     }
 
     fn current_point(&self) -> Option<Point> {
@@ -240,6 +249,7 @@ impl ImageState {
                     self.path.close_path();
                 }
             }
+            b"MP" if op.name(0) == Some(b"PdfCraftImageCrop") => self.app_crop = true,
             b"W" => self.pending_clip = Some(false),
             b"W*" => self.pending_clip = Some(true),
             b"n" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" => {
@@ -248,10 +258,11 @@ impl ImageState {
                     // follows the same rule, and its bounds use cubic extrema, not controls.
                     let bounds = self.path.bounding_box();
                     self.placement.clip = intersection(self.placement.clip, [bounds.x0, bounds.y0, bounds.x1, bounds.y1]).unwrap_or([0.0; 4]);
-                    self.placement.clips.push(ClipPath { path: Arc::new(std::mem::take(&mut self.path)), even_odd });
+                    self.placement.clips.push(ClipPath { path: Arc::new(std::mem::take(&mut self.path)), even_odd, app_crop: self.app_crop });
                 }
                 self.path = BezPath::new();
                 self.subpath_start = None;
+                self.app_crop = false;
             }
             _ => {}
         }
@@ -835,6 +846,9 @@ fn compute_inherited_drawing_ops(source: &DrawingState, dest: &DrawingState, ext
 /// finite points with `m`, `l`, `c` and `h`, so `None` (a quadratic segment) does not happen.
 fn clip_path_to_ops(clip: &ClipPath) -> Option<Vec<Op>> {
     let mut ops = Vec::new();
+    if clip.app_crop {
+        ops.push(crop_marker());
+    }
     for el in clip.path.elements() {
         let (name, points) = match el {
             kurbo::PathEl::MoveTo(p) => ("m", vec![*p]),
@@ -1257,7 +1271,9 @@ fn arrange_image(
         return Err(EditError::Invalid("unsupported graphics state: non-invertible CTM".into()));
     }
 
-    let mut extracted = match extract_scope_state(&ops, scope_start, target, scope_start_ctm)? {
+    let owned_crop = ops.get(scope_start..target).unwrap_or_default().iter().any(|op| op.is("MP") && op.name(0) == Some(b"PdfCraftImageCrop"));
+    let extracted_scope = if owned_crop { None } else { extract_scope_state(&ops, scope_start, target, scope_start_ctm)? };
+    let mut extracted = match extracted_scope {
         Some(ext) => ext,
         None if scope_start != target => {
             if !marked_unit || has_other_paint {
@@ -1472,55 +1488,44 @@ fn image_scopes(ops: &[Op], target: usize, done: &str) -> Result<ImageScopes, Ed
     Ok(ImageScopes { isolated, outermost, placement, clipped })
 }
 
-/// The scope `start..=end` without its private clipping paths and clipping `W n` sequences.
-fn extract_image_drawing_ops(ops: &[Op], start: usize, end: usize) -> Result<(Vec<Op>, bool), EditError> {
-    let is_path = |o: &Op| matches!(o.op.as_slice(), b"m" | b"l" | b"c" | b"v" | b"y" | b"h" | b"re");
-    let mut drawing = Vec::new();
-    let mut removed_clip = false;
-    let mut i = start.saturating_add(1);
-    while i < end {
-        let Some(op) = ops.get(i) else { break };
-        if is_path(op) {
-            let mut k = i;
-            while ops.get(k).is_some_and(is_path) {
-                k = k.saturating_add(1);
-            }
-            if ops.get(k).is_some_and(|o| o.is("W") || o.is("W*")) && ops.get(k.saturating_add(1)).is_some_and(|o| o.is("n")) {
-                removed_clip = true;
-                i = k.saturating_add(2);
-                continue;
-            }
-        }
-        drawing.push(op.clone());
-        i = i.saturating_add(1);
-    }
-    Ok((drawing, removed_clip))
+/// A marked-content point identifies only the clipping path written by this editor.
+/// It does not open a marked-content sequence or change the document's structure tags.
+fn crop_marker() -> Op {
+    Op::new("MP", vec![Object::Name(b"PdfCraftImageCrop".to_vec())])
 }
 
-/// Remove any private clipping path / crop on `img`, drawn on page `p` by its content streams `all`.
+fn app_crop_ranges(ops: &[Op], start: usize, target: usize) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    for (index, op) in ops.iter().enumerate().take(target).skip(start) {
+        if !op.is("MP") || op.name(0) != Some(b"PdfCraftImageCrop") {
+            continue;
+        }
+        let path_start = index.saturating_add(1);
+        let mut end = path_start;
+        while end < target && ops.get(end).is_some_and(|o| matches!(o.op.as_slice(), b"m" | b"l" | b"c" | b"v" | b"y" | b"h" | b"re")) {
+            end = end.saturating_add(1);
+        }
+        if end > path_start && ops.get(end).is_some_and(|o| o.is("W") || o.is("W*")) && ops.get(end.saturating_add(1)).is_some_and(|o| o.is("n")) {
+            ranges.push(index..end.saturating_add(2));
+        }
+    }
+    ranges
+}
+
+/// Remove only crops written by PdfCraft, preserving the document author's clipping paths.
 fn remove_image_crop(doc: &mut Document, p: &pdfcraft_model::Page, all: &[(Object, Vec<u8>)], img: &PageImage) -> Result<(), EditError> {
     let pieces = joined(all);
     let ops = pieces.parse().ops;
     let target = img.op;
-    if !ops.get(target).is_some_and(|op| op.is("Do")) {
-        return Err(EditError::Invalid("the image operation could not be located".into()));
-    }
-    let Some((start, end, _)) = image_scopes(&ops, target, "cropped")?.isolated else {
-        return Err(EditError::Invalid("the image has no crop to remove".into()));
+    let scope = image_scopes(&ops, target, "cropped")?;
+    let Some((start, _, _)) = scope.transform_scope(target) else {
+        return Err(EditError::Invalid("the image has no PdfCraft crop to remove".into()));
     };
-    let (drawing_ops, removed_clip) = extract_image_drawing_ops(&ops, start, end)?;
-    if !removed_clip {
-        return Err(EditError::Invalid("the image has no crop to remove".into()));
+    let crops = app_crop_ranges(&ops, start, target);
+    if crops.is_empty() {
+        return Err(EditError::Invalid("the image has no PdfCraft crop to remove".into()));
     }
-    let start_op = ops.get(start).ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
-    let end_op = ops.get(end).ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
-    let range = start_op.span.start..end_op.span.end;
-    let mut unit_ops = Vec::new();
-    unit_ops.push(Op::new("q", vec![]));
-    unit_ops.extend(drawing_ops);
-    unit_ops.push(Op::new("Q", vec![]));
-    let serialized = serialize_ops(&unit_ops);
-    let changed = pieces.splice([(range, serialized)]);
+    let changed = crate::text::splice(&pieces, &ops, |index| (Vec::new(), !crops.iter().any(|r| r.contains(&index))));
     let contents = crate::text::rewritten_contents(doc, all, changed);
     doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), contents))?;
     Ok(())
@@ -1701,7 +1706,7 @@ fn crop_image_impl(
             && (corners[1].1 - corners[2].1).abs() < 1e-4
             && (corners[2].0 - corners[3].0).abs() < 1e-4
             && (corners[3].1 - corners[0].1).abs() < 1e-4);
-    let clip: Vec<Op> = if is_axis_aligned {
+    let mut clip: Vec<Op> = if is_axis_aligned {
         let min_x = corners.iter().map(|(x, _)| *x).fold(f64::INFINITY, f64::min);
         let max_x = corners.iter().map(|(x, _)| *x).fold(f64::NEG_INFINITY, f64::max);
         let min_y = corners.iter().map(|(_, y)| *y).fold(f64::INFINITY, f64::min);
@@ -1719,19 +1724,10 @@ fn crop_image_impl(
             .chain([Op::new("h", vec![]), Op::new("W", vec![]), Op::new("n", vec![])])
             .collect()
     };
-    // The image's own earlier crop (a clipping path right after the scope's `q`, in the CTM before
-    // the scope) gives way to the new one, so a crop can grow again as well as shrink.
-    let old_clip: Option<std::ops::Range<usize>> = (start != end)
-        .then(|| {
-            let mut k = start + 1;
-            while ops.get(k).is_some_and(|o| matches!(o.op.as_slice(), b"m" | b"l" | b"c" | b"v" | b"y" | b"h" | b"re")) {
-                k += 1;
-            }
-            (k > start + 1 && ops.get(k).is_some_and(|o| matches!(o.op.as_slice(), b"W" | b"W*")) && ops.get(k + 1).is_some_and(|o| o.is("n")))
-                .then_some(start + 1..k + 2)
-        })
-        .flatten();
-    let insert_at = old_clip.as_ref().map_or(start + 1, |r| r.start);
+    clip.insert(0, crop_marker());
+    // Replace only our identified crop; an author's path must remain intact.
+    let old_crops = app_crop_ranges(&ops, start, target);
+    let insert_at = start.saturating_add(1);
     let changed = crate::text::splice(&pieces, &ops, |index| {
         if start == end && index == target {
             // No scope of its own yet: one around the drawing, with the crop inside.
@@ -1742,8 +1738,8 @@ fn crop_image_impl(
             (out, false)
         } else if start != end && index == insert_at {
             // Inside the scope's `q`, before whatever it draws (in place of its old crop).
-            (clip.clone(), old_clip.is_none())
-        } else if old_clip.as_ref().is_some_and(|r| r.contains(&index)) {
+            (clip.clone(), !old_crops.iter().any(|r| r.contains(&index)))
+        } else if old_crops.iter().any(|r| r.contains(&index)) {
             (Vec::new(), false)
         } else {
             (Vec::new(), true)

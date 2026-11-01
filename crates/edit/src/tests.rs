@@ -3836,8 +3836,9 @@ fn image_arrange_stacking_order_and_remove_crop() {
     assert!(close(imgs_after_back[1].rect, [200.0, 200.0, 350.0, 350.0]));
 
     // Test remove crop
-    let cropped_content = "q 100 100 50 50 re W n 200 0 0 100 100 100 cm /Im0 Do Q";
+    let cropped_content = "q 200 0 0 100 100 100 cm /Im0 Do Q";
     let mut doc = image_page_with(cropped_content);
+    crop(&mut doc, 0, 0, [100.0, 100.0, 150.0, 150.0]).unwrap();
     let img_before = &images::page_images(&doc, 0).unwrap()[0];
     assert_ne!(img_before.visible_rect, Some(img_before.rect));
     remove_crop(&mut doc, 0, 0).unwrap();
@@ -4200,8 +4201,9 @@ fn image_arrange_preserves_exact_non_rectangular_clipping_path() {
 fn image_remove_crop_after_arrange_keeps_position_under_outer_transform() {
     // Arrange writes `cm inverse`, the clip, then the absolute placement; Remove Crop used to drop
     // only the first, which drew the image under the outer translation twice.
-    let content = "1 0 0 1 50 50 cm q 0 0 50 50 re W n 100 0 0 100 0 0 cm /Im0 Do Q BT /F1 12 Tf 72 700 Td (External Text) Tj ET";
+    let content = "1 0 0 1 50 50 cm q 100 0 0 100 0 0 cm /Im0 Do Q BT /F1 12 Tf 72 700 Td (External Text) Tj ET";
     let mut doc = image_page_with(content);
+    crop(&mut doc, 0, 0, [50.0, 50.0, 100.0, 100.0]).unwrap();
     assert_eq!(images::page_images(&doc, 0).unwrap()[0].rect, [50.0, 50.0, 150.0, 150.0]);
 
     arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
@@ -9755,8 +9757,9 @@ fn a_run_of_spaces_in_a_subset_without_a_space_glyph_keeps_its_width() {
 fn image_exclusive_scope_resets_path_on_scope_exit() {
     // An earlier scope has a path operation closed by Q (with 'h' closepath).
     // The subsequent image in its own scope must cleanly extract and allow crop removal.
-    let content = "q 0 0 m 10 10 l h Q q 100 100 200 100 re W n 200 0 0 100 100 100 cm /Im0 Do Q";
+    let content = "q 0 0 m 10 10 l h Q q 200 0 0 100 100 100 cm /Im0 Do Q";
     let mut doc = image_page_with(content);
+    crop(&mut doc, 0, 0, [100.0, 100.0, 250.0, 180.0]).unwrap();
     let before = images::page_images(&doc, 0).unwrap();
     assert_eq!(before.len(), 1);
     remove_crop(&mut doc, 0, 0).unwrap();
@@ -9851,11 +9854,13 @@ fn remove_crop_preserves_cm_before_extgstate() {
     let mut doc = image_page_with(content);
     let before = images::page_images(&doc, 0).unwrap();
     assert_eq!(before.len(), 1);
+    crop(&mut doc, 0, 0, [100.0, 100.0, 110.0, 110.0]).unwrap();
     remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let bytes = page_content_bytes(&doc, 0);
     let s = String::from_utf8_lossy(&bytes);
-    assert!(!s.contains("W n"), "clipping path must be removed: {s}");
+    assert!(s.contains("W n"), "the author clipping path must remain: {s}");
+    assert!(!s.contains("PdfCraftImageCrop"), "the editor crop must be removed: {s}");
     // Verify that the initial cm appears before /GS0 gs
     let cm_pos = s.find("2 0 0 2 0 0 cm").expect("cm must be preserved");
     let gs_pos = s.find("/GS0 gs").expect("gs must be preserved");
@@ -9939,16 +9944,37 @@ fn styled_existing_justification_is_refused_instead_of_silently_left_aligning() 
     assert_eq!(page_content_bytes(&reopen(&doc), 0), before);
 }
 
-
 #[test]
 fn image_arrange_refuses_crossed_scope_boundaries_without_changes() {
-    for content in [
-        "/P <</MCID 0>> BDC q 10 0 0 10 0 0 cm /Im0 Do EMC Q /Im0 Do",
-        "q /P <</MCID 0>> BDC /Im0 Do Q EMC /Im0 Do",
-    ] {
+    for content in ["/P <</MCID 0>> BDC q 10 0 0 10 0 0 cm /Im0 Do EMC Q /Im0 Do", "q /P <</MCID 0>> BDC /Im0 Do Q EMC /Im0 Do"] {
         let mut doc = image_page_with(content);
         let before = page_content_bytes(&doc, 0);
         assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).is_err(), "{content}");
         assert_eq!(page_content_bytes(&doc, 0), before);
     }
+}
+
+#[test]
+fn removing_a_crop_preserves_author_clips_and_works_under_outer_clip() {
+    for content in ["0 0 300 300 re W n q 10 0 0 10 50 50 cm /Im0 Do Q", "q 50 50 8 8 re W n 10 0 0 10 50 50 cm /Im0 Do Q"] {
+        let mut doc = image_page_with(content);
+        let original = images::page_images(&doc, 0).unwrap()[0].clone();
+        crop(&mut doc, 0, 0, [52.0, 52.0, 55.0, 55.0]).unwrap();
+        let mut doc = reopen(&doc);
+        remove_crop(&mut doc, 0, 0).unwrap();
+        let mut doc = reopen(&doc);
+        let restored = images::page_images(&doc, 0).unwrap()[0].clone();
+        assert_eq!(restored.rect, original.rect);
+        assert_eq!(restored.visible_rect, original.visible_rect);
+        assert_eq!(restored.contains([59.0, 59.0]), original.contains([59.0, 59.0]));
+        assert!(remove_crop(&mut doc, 0, 0).is_err());
+    }
+}
+
+#[test]
+fn remove_crop_refuses_an_unmarked_author_clip_without_changes() {
+    let mut doc = image_page_with("q 50 50 8 8 re W n 10 0 0 10 50 50 cm /Im0 Do Q");
+    let before = page_content_bytes(&doc, 0);
+    assert!(remove_crop(&mut doc, 0, 0).is_err());
+    assert_eq!(page_content_bytes(&doc, 0), before);
 }
