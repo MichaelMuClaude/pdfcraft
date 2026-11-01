@@ -30,7 +30,6 @@ impl Pixels {
     }
 
     /// Bytes the buffer holds allocated (its capacity), for memory budgets.
-    #[allow(dead_code)]
     pub(crate) fn byte_capacity(&self) -> usize {
         self.0.capacity().saturating_mul(4)
     }

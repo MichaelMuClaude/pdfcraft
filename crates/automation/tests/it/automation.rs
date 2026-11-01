@@ -1121,11 +1121,11 @@ fn a_recovered_page_tree_survives_a_full_save() {
         original.extend_from_slice(b"\nendobj\n");
     }
     let xref = original.len();
-    original.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    original.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
     for o in offsets {
         original.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
-    original.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    original.extend_from_slice(format!("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes());
     std::fs::write(dir.join("damaged.pdf"), &original).unwrap();
 
     let mut a = auto(&dir);
