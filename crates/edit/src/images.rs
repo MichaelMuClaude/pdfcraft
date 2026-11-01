@@ -976,6 +976,30 @@ fn target_destination_unit<'a>(
     dest.map(|u| (u, forward)).ok_or_else(refused)
 }
 
+/// A moved unit must not borrow a graphics or marked-content boundary from its neighbours.
+fn balanced_arrange_span(ops: &[Op], range: std::ops::Range<usize>) -> bool {
+    let Some(slice) = ops.get(range) else { return false };
+    let (mut graphics, mut marked) = (0usize, 0usize);
+    for op in slice {
+        let depth = match op.op.as_slice() {
+            b"q" => {
+                graphics = graphics.saturating_add(1);
+                continue;
+            }
+            b"BDC" | b"BMC" => {
+                marked = marked.saturating_add(1);
+                continue;
+            }
+            b"Q" => &mut graphics,
+            b"EMC" => &mut marked,
+            _ => continue,
+        };
+        let Some(next) = depth.checked_sub(1) else { return false };
+        *depth = next;
+    }
+    graphics == 0 && marked == 0
+}
+
 /// What Arrange takes out: the byte span, the op where the image's own scope state starts, and the
 /// ops `start..end` removed. That is the image's own `q … Q` scope inside its unit, else the `Do`
 /// alone when the unit paints something else too, else the whole unit.
@@ -999,6 +1023,9 @@ fn determine_arrange_spans(
         _ if marked_unit => (target_unit.start, target_unit.start.saturating_add(1).min(target), unit_last),
         _ => (target_unit.start, target_unit.start, unit_last),
     };
+    if !balanced_arrange_span(ops, first..last.saturating_add(1)) {
+        return Err(EditError::Invalid("cannot arrange an image across graphics or marked-content boundaries".into()));
+    }
     let missing = || EditError::Invalid("the image content unit could not be located".into());
     let start = ops.get(first).ok_or_else(missing)?.span.start;
     let end = ops.get(last).ok_or_else(missing)?.span.end;
@@ -1149,6 +1176,9 @@ fn arrange_image(
     }
 
     let (dest_unit, insert_after) = target_destination_unit(&units, target_idx, target_unit, order, has_other_paint)?;
+    if !balanced_arrange_span(&ops, target_unit.clone()) || !balanced_arrange_span(&ops, dest_unit.clone()) {
+        return Err(EditError::Invalid("cannot arrange an image across graphics or marked-content boundaries".into()));
+    }
 
     // A marked-content sequence that holds other content cannot be split without generating
     // a new structure element and MCID, so we refuse to rearrange it to avoid leaving the image untagged.

@@ -9938,3 +9938,17 @@ fn styled_existing_justification_is_refused_instead_of_silently_left_aligning() 
     assert_eq!(page_content_bytes(&doc, 0), before);
     assert_eq!(page_content_bytes(&reopen(&doc), 0), before);
 }
+
+
+#[test]
+fn image_arrange_refuses_crossed_scope_boundaries_without_changes() {
+    for content in [
+        "/P <</MCID 0>> BDC q 10 0 0 10 0 0 cm /Im0 Do EMC Q /Im0 Do",
+        "q /P <</MCID 0>> BDC /Im0 Do Q EMC /Im0 Do",
+    ] {
+        let mut doc = image_page_with(content);
+        let before = page_content_bytes(&doc, 0);
+        assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).is_err(), "{content}");
+        assert_eq!(page_content_bytes(&doc, 0), before);
+    }
+}
