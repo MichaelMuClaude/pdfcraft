@@ -4,6 +4,7 @@ use super::{
 };
 use crate::SourceProblem;
 use crate::sources::{comment_source, import_pdf_comments};
+use pdfcraft_content::Matrix;
 
 /// Whether the opening password allows an edit (§7.6.4.2, Table 22).
 pub(crate) fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), EditError> {
@@ -309,18 +310,12 @@ fn run_edit_page_image(doc: &mut pdfcraft_cos::Document, page: usize, index: usi
     };
 
     let added_items: Vec<(usize, pdfcraft_edit::Added)> = pdfcraft_edit::list_added(doc).into_iter().filter(|a| a.page == page).enumerate().collect();
-    let matched_added = if let (Some(st_ref), Some(target_ref)) = (target_stream_obj, img.object) {
-        added_items
-            .iter()
-            .find(|(_, a)| a.obj == st_ref && matches!(&a.content, AddedContent::Image(ai) if ai.image == target_ref))
-            .or_else(|| added_items.iter().find(|(_, a)| matches!(&a.content, AddedContent::Image(ai) if ai.image == target_ref)))
-    } else if let Some(st_ref) = target_stream_obj {
-        added_items.iter().find(|(_, a)| a.obj == st_ref)
-    } else if let Some(target_ref) = img.object {
-        added_items.iter().find(|(_, a)| matches!(&a.content, AddedContent::Image(ai) if ai.image == target_ref))
-    } else {
-        None
-    };
+    // Prefer the added item in the image's own content stream; fall back to any showing it.
+    let shows_image = |a: &pdfcraft_edit::Added| img.object.is_some_and(|t| matches!(&a.content, AddedContent::Image(ai) if ai.image == t));
+    let matched_added = added_items
+        .iter()
+        .find(|(_, a)| target_stream_obj == Some(a.obj) && (img.object.is_none() || shows_image(a)))
+        .or_else(|| added_items.iter().find(|(_, a)| shows_image(a)));
 
     let mut ai_to_update = None;
     if let Some((added_idx, added_item)) = matched_added
@@ -348,82 +343,42 @@ fn run_edit_page_image(doc: &mut pdfcraft_cos::Document, page: usize, index: usi
     }
 
     if let Some((added_idx, mut ai)) = ai_to_update {
-        let view = page_model.view_matrix(doc);
-        let det = view[0] * view[3] - view[1] * view[2];
-        if det.abs() < 1e-12 || !det.is_finite() {
-            return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("invalid page transform".into())));
-        }
-        let (ia, ib, ic, id) = (view[3] / det, -view[1] / det, -view[2] / det, view[0] / det);
-        let to_display = [ia, ib, ic, id, -(view[4] * ia + view[5] * ic), -(view[4] * ib + view[5] * id)];
-        let apply = |m: [f64; 6], x: f64, y: f64| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
-        let bbox = |m: [f64; 6], r: [f64; 4]| {
-            let pts = [apply(m, r[0], r[1]), apply(m, r[2], r[1]), apply(m, r[0], r[3]), apply(m, r[2], r[3])];
-            let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
-            for (x, y) in pts {
-                b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
-            }
-            b
-        };
+        let view = Matrix(page_model.view_matrix(doc));
+        let to_display = view.invert().ok_or_else(|| EditError::Edit(pdfcraft_edit::EditError::Invalid("invalid page transform".into())))?;
 
         match change {
             ImageEdit::Move(to) => {
-                if !to.iter().all(|v| v.is_finite()) {
-                    return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("invalid position".into())));
-                }
-                ai.rect = bbox(to_display, *to);
+                ai.rect = to_display.bbox(*to);
                 pdfcraft_edit::update_content(doc, page, added_idx, &AddedContent::Image(ai))?;
             }
             ImageEdit::Transform(_) | ImageEdit::Flip { .. } => {
                 let pdfcraft_edit::ImageChange::Transform(t) = c else {
                     return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("expected transform".into())));
                 };
-                let mul = |m1: [f64; 6], m2: [f64; 6]| {
-                    [
-                        m1[0] * m2[0] + m1[1] * m2[2],
-                        m1[0] * m2[1] + m1[1] * m2[3],
-                        m1[2] * m2[0] + m1[3] * m2[2],
-                        m1[2] * m2[1] + m1[3] * m2[3],
-                        m1[4] * m2[0] + m1[5] * m2[2] + m2[4],
-                        m1[4] * m2[1] + m1[5] * m2[3] + m2[5],
-                    ]
-                };
-                let t_display = mul(mul(view, t), to_display);
-                let is_parallel = t_display[1].abs() < 1e-5 && t_display[2].abs() < 1e-5;
-                let is_perpendicular = t_display[0].abs() < 1e-5 && t_display[3].abs() < 1e-5;
+                let t_display = view.then(&Matrix(t)).then(&to_display);
+                let [ta, tb, tc, td, _, _] = t_display.0;
+                let is_parallel = tb.abs() < 1e-5 && tc.abs() < 1e-5;
+                let is_perpendicular = ta.abs() < 1e-5 && td.abs() < 1e-5;
 
-                if is_parallel {
-                    let (toggle_h, toggle_v) =
-                        if ai.rotation % 2 == 1 { (t_display[3] < 0.0, t_display[0] < 0.0) } else { (t_display[0] < 0.0, t_display[3] < 0.0) };
-                    if toggle_h {
-                        ai.flip_h = !ai.flip_h;
-                    }
-                    if toggle_v {
-                        ai.flip_v = !ai.flip_v;
-                    }
-                    ai.rect = bbox(t_display, ai.rect);
+                let (quarters_ccw, disp_flip_h, disp_flip_v) = if is_parallel {
+                    (0, ta < 0.0, td < 0.0)
                 } else if is_perpendicular {
-                    let b_pos = t_display[1] > 0.0;
-                    let c_pos = t_display[2] > 0.0;
-                    let (quarters_ccw, disp_flip_h, disp_flip_v) = match (b_pos, c_pos) {
+                    match (tb > 0.0, tc > 0.0) {
                         (true, false) => (1, false, false),
                         (false, true) => (3, false, false),
                         (true, true) => (1, false, true),
                         (false, false) => (1, true, false),
-                    };
-                    let (toggle_h, toggle_v) = if ai.rotation % 2 == 1 { (disp_flip_v, disp_flip_h) } else { (disp_flip_h, disp_flip_v) };
-                    if toggle_h {
-                        ai.flip_h = !ai.flip_h;
                     }
-                    if toggle_v {
-                        ai.flip_v = !ai.flip_v;
-                    }
-                    ai.rotation = (ai.rotation + quarters_ccw) % 4;
-                    ai.rect = bbox(t_display, ai.rect);
                 } else {
                     return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid(
                         "non-axis-aligned transforms are not supported for added images".into(),
                     )));
-                }
+                };
+                let (toggle_h, toggle_v) = if ai.rotation % 2 == 1 { (disp_flip_v, disp_flip_h) } else { (disp_flip_h, disp_flip_v) };
+                ai.flip_h ^= toggle_h;
+                ai.flip_v ^= toggle_v;
+                ai.rotation = (ai.rotation + quarters_ccw) % 4;
+                ai.rect = t_display.bbox(ai.rect);
                 pdfcraft_edit::update_content(doc, page, added_idx, &AddedContent::Image(ai))?;
             }
             ImageEdit::Rotate(q) => {
