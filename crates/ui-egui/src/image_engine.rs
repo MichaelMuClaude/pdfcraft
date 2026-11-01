@@ -186,7 +186,26 @@ pub fn apply_crop(image_rect: Rect, uv_rect: Rect, handle: ImageHandle, delta: V
     } else if matches!(handle, ImageHandle::BottomLeft | ImageHandle::BottomCenter | ImageHandle::BottomRight) {
         uv.max.y = (uv.max.y + delta.y / scale.y).clamp((uv.min.y + minimum.y).min(1.0), 1.0);
     }
-    let screen = Rect::from_min_max(image_rect.min + (uv.min - uv_rect.min) * scale, image_rect.max + (uv.max - uv_rect.max) * scale);
+    // Reconstruct from the fixed opposite edge, rather than adding a nearly full-width
+    // shift to the moved edge. Calculate in f64 so each screen coordinate rounds only
+    // once to f32; small crops far from the origin otherwise lose multiple ulps.
+    let span = |min: f32, max: f32| f64::from(max) - f64::from(min);
+    let width = span(image_rect.min.x, image_rect.max.x) * span(uv.min.x, uv.max.x) / span(uv_rect.min.x, uv_rect.max.x);
+    let height = span(image_rect.min.y, image_rect.max.y) * span(uv.min.y, uv.max.y) / span(uv_rect.min.y, uv_rect.max.y);
+    let mut screen = image_rect;
+    if uv.min.x != uv_rect.min.x {
+        screen.min.x = (f64::from(image_rect.max.x) - width) as f32;
+    } else if uv.max.x != uv_rect.max.x {
+        screen.max.x = (f64::from(image_rect.min.x) + width) as f32;
+    }
+    if uv.min.y != uv_rect.min.y {
+        screen.min.y = (f64::from(image_rect.max.y) - height) as f32;
+    } else if uv.max.y != uv_rect.max.y {
+        screen.max.y = (f64::from(image_rect.min.y) + height) as f32;
+    }
+    if !screen.is_finite() || !screen.is_positive() {
+        return (image_rect, uv_rect);
+    }
     (screen, uv)
 }
 
@@ -251,6 +270,39 @@ pub fn draw_handle(painter: &egui::Painter, center: Pos2, is_active: bool, is_ho
 mod tests {
     use super::*;
     use egui::vec2;
+
+    // Verify scale in screen space: dividing an endpoint's rounding error by a tiny
+    // retained UV span would magnify it and make a fixed scale tolerance invalid.
+    fn crop_scale_preserved(before: Rect, uv_before: Rect, after: Rect, uv_after: Rect) -> bool {
+        let axis = |lo: f32, hi: f32, u0: f32, u1: f32, new_lo: f32, new_hi: f32, v0: f32, v1: f32| {
+            let span = f64::from(hi) - f64::from(lo);
+            let expected = span * (f64::from(v1) - f64::from(v0)) / (f64::from(u1) - f64::from(u0));
+            let actual = f64::from(new_hi) - f64::from(new_lo);
+            // One moved endpoint rounds once to f32. EPSILON * coordinate magnitude
+            // bounds one ulp (conservatively twice the nearest-rounding error).
+            // The f64 term also covers the two arithmetic operations above.
+            let magnitude = f64::from(new_lo).abs().max(f64::from(new_hi).abs()).max(expected.abs());
+            let bound = f64::from(f32::EPSILON) * magnitude + 4.0 * f64::EPSILON * span.abs();
+            (actual - expected).abs() <= bound
+        };
+        axis(before.min.x, before.max.x, uv_before.min.x, uv_before.max.x, after.min.x, after.max.x, uv_after.min.x, uv_after.max.x)
+            && axis(before.min.y, before.max.y, uv_before.min.y, uv_before.max.y, after.min.y, after.max.y, uv_after.min.y, uv_after.max.y)
+    }
+
+    #[test]
+    fn crop_scale_at_large_screen_offset() {
+        let screen = Rect::from_min_size(pos2(813.7157, 0.0), vec2(495.0725, 50.0));
+        let uv = Rect::from_min_size(pos2(0.114936605, 0.0), vec2(0.32074833, 0.3));
+        let (cropped, kept) = apply_crop(screen, uv, ImageHandle::BottomLeft, vec2(1255.676, 0.0));
+        let width = (f64::from(screen.max.x) - f64::from(screen.min.x)) * (f64::from(kept.max.x) - f64::from(kept.min.x))
+            / (f64::from(uv.max.x) - f64::from(uv.min.x));
+        assert_eq!(cropped.min.x, (f64::from(screen.max.x) - width) as f32, "moved edge rounds once from the fixed anchor");
+        assert_eq!(cropped.max.x, screen.max.x, "opposite horizontal edge stays fixed");
+        assert_eq!(cropped.min.y, screen.min.y, "opposite vertical edge stays fixed");
+        assert!(crop_scale_preserved(screen, uv, cropped, kept));
+        let stretched = Rect::from_min_max(cropped.min - vec2(0.1, 0.0), cropped.max);
+        assert!(!crop_scale_preserved(screen, uv, stretched, kept), "a visible stretch must exceed the rounding bound");
+    }
 
     #[test]
     fn test_resize_bottom_right_anchor() {
@@ -480,9 +532,21 @@ mod tests {
                 prop_assert!(new_uv.width() > 0.0);
                 prop_assert!(new_uv.height() > 0.0);
 
-                let scale_x_orig = w / uv_w;
-                let scale_x_new = new_screen.width() / new_uv.width();
-                prop_assert!((scale_x_orig - scale_x_new).abs() < 1e-2);
+                if !matches!(handle, ImageHandle::TopLeft | ImageHandle::LeftCenter | ImageHandle::BottomLeft) {
+                    prop_assert_eq!(new_screen.min.x, screen.min.x, "stationary left edge moved");
+                }
+                if !matches!(handle, ImageHandle::TopRight | ImageHandle::RightCenter | ImageHandle::BottomRight) {
+                    prop_assert_eq!(new_screen.max.x, screen.max.x, "stationary right edge moved");
+                }
+                if !matches!(handle, ImageHandle::TopLeft | ImageHandle::TopCenter | ImageHandle::TopRight) {
+                    prop_assert_eq!(new_screen.min.y, screen.min.y, "stationary top edge moved");
+                }
+                if !matches!(handle, ImageHandle::BottomLeft | ImageHandle::BottomCenter | ImageHandle::BottomRight) {
+                    prop_assert_eq!(new_screen.max.y, screen.max.y, "stationary bottom edge moved");
+                }
+
+                prop_assert!(crop_scale_preserved(screen, uv, new_screen, new_uv),
+                    "screen/UV scale changed beyond endpoint rounding: {screen:?} {uv:?} => {new_screen:?} {new_uv:?}");
             }
 
             #[test]
