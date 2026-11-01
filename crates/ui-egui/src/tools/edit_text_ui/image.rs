@@ -194,6 +194,32 @@ fn crop_handles(k: Rect) -> [Pos2; 8] {
     [k.left_top(), k.right_top(), k.left_bottom(), k.right_bottom(), k.center_top(), k.right_center(), k.center_bottom(), k.left_center()]
 }
 
+// Keep a dragged crop inside the image, including images smaller than six screen pixels.
+fn clamp_crop(b: Rect, new_screen: Rect) -> Rect {
+    if !b.is_finite() || !b.is_positive() || !b.size().is_finite() || !new_screen.is_finite() {
+        return new_screen;
+    }
+    let (min_w, min_h) = (6.0_f32.min(b.width()), 6.0_f32.min(b.height()));
+    Rect::from_min_max(
+        pos2(new_screen.min.x.clamp(b.min.x, b.max.x - min_w), new_screen.min.y.clamp(b.min.y, b.max.y - min_h)),
+        pos2(new_screen.max.x.clamp(b.min.x + min_w, b.max.x), new_screen.max.y.clamp(b.min.y + min_h, b.max.y)),
+    )
+}
+
+#[cfg(test)]
+mod crop_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn crop_drag_rejects_nonfinite_bounds() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let bounds = Rect { min: pos2(value, 0.0), max: pos2(100.0, 100.0) };
+            let keep = Rect::from_min_max(pos2(10.0, 10.0), pos2(50.0, 50.0));
+            assert_eq!(clamp_crop(bounds, keep), keep);
+        }
+    }
+}
+
 /// Crop mode for the selected image `i` whose visible frame is `b` (screen). Returns `true`
 /// (the pointer and keys are the crop's while it lasts).
 #[allow(clippy::cognitive_complexity)]
@@ -206,6 +232,10 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     let b = if full_b.is_positive() { full_b } else { xf.user_rect(info, page, image.visible_rect.unwrap_or(image.rect).map(|v| v as f32)) };
     let keep_screen = |keep: [f64; 4]| xf.user_rect(info, page, keep.map(|v| v as f32)).intersect(b);
     let k = keep_screen(mode.keep);
+    if !b.is_finite() || !b.is_positive() || !b.size().is_finite() || !k.is_finite() || !k.is_positive() {
+        mode.drag = None;
+        return true;
+    }
 
     if allow_interaction
         && resp.drag_started()
@@ -222,6 +252,10 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     {
         let d = p - start;
         let k0 = keep_screen(at_start);
+        if !d.is_finite() || !k0.is_finite() || !k0.is_positive() {
+            mode.drag = None;
+            return true;
+        }
         if let Some(&handle) = GRIPS.get(grip) {
             let uv0 = if b.width() > 0.0 && b.height() > 0.0 {
                 Rect::from_min_max(
@@ -232,11 +266,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
             };
             let (new_screen, _) = apply_crop(k0, uv0, handle, d);
-            let (min_w, min_h) = (6.0_f32.min(b.width()), 6.0_f32.min(b.height()));
-            let clamped = Rect::from_min_max(
-                pos2(new_screen.min.x.clamp(b.min.x, b.max.x - min_w), new_screen.min.y.clamp(b.min.y, b.max.y - min_h)),
-                pos2(new_screen.max.x.clamp(b.min.x + min_w, b.max.x), new_screen.max.y.clamp(b.min.y + min_h, b.max.y)),
-            );
+            let clamped = clamp_crop(b, new_screen);
             mode.keep = user_box(xf, info, page, clamped);
         } else {
             let shift = egui::vec2(d.x.clamp(b.min.x - k0.min.x, b.max.x - k0.max.x), d.y.clamp(b.min.y - k0.min.y, b.max.y - k0.max.y));
