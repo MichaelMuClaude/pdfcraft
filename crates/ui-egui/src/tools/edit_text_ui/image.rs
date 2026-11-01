@@ -78,7 +78,11 @@ pub struct ImageSelection {
     pub drag: Option<ImageDrag>,
     /// Crop mode: the box kept so far.
     pub crop: Option<CropMode>,
+    /// Unused (crop mode is `crop.is_some()`); goes once no literal sets it.
+    #[doc(hidden)]
     pub crop_mode: bool,
+    /// Unused; goes once no literal sets it.
+    #[doc(hidden)]
     pub crop_rect: Option<Rect>,
     /// The drag is turning the picture by its rotate handle (the `drag` start is then unused).
     pub turning: bool,
@@ -191,14 +195,7 @@ fn crop_handles(k: Rect) -> [Pos2; 8] {
 fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_engine::PageImage) -> bool {
     let ImageCx { ui, resp, xf, ptr, page, info, allow_interaction } = *cx;
     let painter = ui.painter();
-    let Some(sel) = view.image_selection.as_mut() else { return false };
-    if let Some(rect) = sel.crop_rect
-        && let Some(mode) = sel.crop.as_mut()
-    {
-        mode.keep = user_box(xf, info, page, rect);
-        sel.crop_rect = None;
-    }
-    let Some(mode) = sel.crop.as_mut() else { return false };
+    let Some(mode) = view.image_selection.as_mut().and_then(|s| s.crop.as_mut()) else { return false };
     let hover_pos = ptr.pos;
     let full_b = xf.user_rect(info, page, image.rect.map(|v| v as f32));
     let b = if full_b.is_positive() { full_b } else { xf.user_rect(info, page, image.visible_rect.unwrap_or(image.rect).map(|v| v as f32)) };
@@ -387,15 +384,10 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     if reset_clicked {
         mode.keep = image.rect;
         mode.drag = None;
-        if let Some(s) = view.image_selection.as_mut() {
-            s.crop_rect = None;
-        }
     } else if done_clicked || keys(egui::Key::Enter) {
         let keep = mode.keep;
         if let Some(s) = view.image_selection.as_mut() {
             s.crop = None;
-            s.crop_mode = false;
-            s.crop_rect = None;
         }
         let is_full = (keep[0] - image.rect[0]).abs() < 1e-3
             && (keep[1] - image.rect[1]).abs() < 1e-3
@@ -412,8 +404,6 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
         && let Some(s) = view.image_selection.as_mut()
     {
         s.crop = None;
-        s.crop_mode = false;
-        s.crop_rect = None;
     }
     true
 }
@@ -543,9 +533,8 @@ pub fn image_menu_id() -> egui::Id {
 
 /// Images on a page: select, move, resize, right-click. Returns `true` when the pointer was used.
 #[allow(clippy::cognitive_complexity)]
-pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage], view: &mut DocView, action: &mut Option<ImageAction>) -> bool {
+pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage], view: &mut DocView) -> bool {
     let ImageCx { ui, resp, xf, ptr, page, info, allow_interaction } = *cx;
-    let _ = &action;
     let boxes: Vec<Rect> = images.iter().map(|im| crate::canvas::image_screen_rect(im, xf, info, page)).collect();
     let painter = ui.painter();
     let hover_pos = ptr.pos;
@@ -635,13 +624,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             }
         }
 
-        if view.image_selection.as_ref().is_some_and(|s| s.crop.is_some() || s.crop_mode) {
-            if let Some(s) = view.image_selection.as_mut()
-                && s.crop.is_none()
-            {
-                let rect = images.get(i).and_then(|im| im.visible_rect).unwrap_or(images.get(i).map_or([0.0; 4], |im| im.rect));
-                s.crop = Some(CropMode::new(rect));
-            }
+        if view.image_selection.as_ref().is_some_and(|s| s.crop.is_some()) {
             return crop_input(cx, view, i, image);
         }
         let (knob, stem) = rotate_knob(b, ui.clip_rect());
@@ -859,33 +842,11 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             let h0 = (c0 * c0 + d0 * d0).sqrt().max(1e-6);
             let u_axis = (a0 / w0, b0 / w0);
             let v_axis = (c0 / h0, d0 / h0);
-            let center_user = (e0 + 0.5 * (a0 + c0), f0 + 0.5 * (b0 + d0));
 
             let (sx, sy) = screen_to_user(xf, info, page, drag.start);
             let (px, py) = screen_to_user(xf, info, page, p);
 
             let (m_new, cursor_icon) = match drag.target {
-                DragTarget::Rotate => {
-                    let v0 = (sx - center_user.0, sy - center_user.1);
-                    let v1 = (px - center_user.0, py - center_user.1);
-                    let theta0 = v0.1.atan2(v0.0);
-                    let theta1 = v1.1.atan2(v1.0);
-                    let mut delta = theta1 - theta0;
-                    if ui.input(|i| i.modifiers.shift) {
-                        let step = std::f64::consts::PI / 12.0;
-                        delta = (delta / step).round() * step;
-                    }
-                    let (cos_d, sin_d) = (delta.cos(), delta.sin());
-                    let t_rot = [
-                        cos_d,
-                        sin_d,
-                        -sin_d,
-                        cos_d,
-                        center_user.0 * (1.0 - cos_d) + center_user.1 * sin_d,
-                        center_user.1 * (1.0 - cos_d) - center_user.0 * sin_d,
-                    ];
-                    (m_init.then(&Matrix(t_rot)), egui::CursorIcon::Grab)
-                }
                 DragTarget::Move => {
                     let (dx, dy) = (px - sx, py - sy);
                     (Matrix([a0, b0, c0, d0, e0 + dx, f0 + dy]), egui::CursorIcon::Move)
@@ -981,6 +942,8 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                     let mat = Matrix([new_w * u_axis.0, new_w * u_axis.1, new_h * v_axis.0, new_h * v_axis.1, p00_new.0, p00_new.1]);
                     (mat, icon)
                 }
+                // Turning is handled above.
+                DragTarget::Rotate => (m_init, egui::CursorIcon::Default),
             };
 
             let preview_obb = ImageObb::from_matrix(m_new.0, xf, info, page);
@@ -1131,8 +1094,6 @@ pub(crate) fn image_context_menu(
             if let Some(s) = view.image_selection.as_mut() {
                 let rect = img.visible_rect.unwrap_or(img.rect);
                 s.crop = Some(CropMode::new(rect));
-                s.crop_mode = true;
-                s.crop_rect = None;
             }
             close(ui);
         }

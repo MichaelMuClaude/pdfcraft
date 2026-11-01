@@ -4759,16 +4759,16 @@ fn image_edge_handle_stretch_and_crop_mode() {
     h.run_steps(2);
     h.get_by_label("Crop").click();
     h.run_steps(2);
-    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop_mode));
+    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_some()));
 
     // Set smaller crop rect
     let smaller = egui::Rect::from_center_size(c, egui::vec2(50.0, 50.0));
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_rect = Some(smaller);
+    set_crop_box(&mut h, smaller);
 
     // Confirm crop with Enter key
     h.key_press(egui::Key::Enter);
     h.run_steps(4);
-    assert!(!h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop_mode));
+    assert!(!h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_some()));
     let doc_id = h.state().views[0].id;
     let images = h.state().session.get(doc_id).unwrap().page_images(0);
     assert_eq!(images.len(), 1, "image still exists: {images:?}");
@@ -5140,6 +5140,17 @@ fn click_at(h: &mut Harness<'static, PdfCraftApp>, at: egui::Pos2) {
     h.run_steps(1);
     h.drop_at(at);
     h.run_steps(4);
+}
+
+/// Sets the open crop's box on page 0 to the screen rectangle `r`, as dragging its handles would.
+fn set_crop_box(h: &mut Harness<'static, PdfCraftApp>, r: egui::Rect) {
+    let view = &h.state().views[0];
+    let page = &h.state().session.get(view.id).unwrap().info.pages[0];
+    let xf = pdfcraft_ui_egui::canvas::PageXform { rect: view.page_screen_rect(0).unwrap(), rot: view.rotation, pw: page.width, ph: page.height };
+    let (a, b) = (xf.screen_to_view(r.min), xf.screen_to_view(r.max));
+    let (u, v) = (page.view_to_user(a.0, a.1), page.view_to_user(b.0, b.1));
+    let keep = [u[0].min(v[0]), u[1].min(v[1]), u[0].max(v[0]), u[1].max(v[1])].map(f64::from);
+    h.state_mut().views[0].image_selection.as_mut().unwrap().crop.as_mut().unwrap().keep = keep;
 }
 
 fn press(h: &mut Harness<'static, PdfCraftApp>, modifiers: Modifiers, key: Key) {
@@ -7444,13 +7455,13 @@ fn added_and_pasted_image_uses_refactored_image_edits() {
     h.run_steps(2);
     h.get_by_label("Crop").click();
     h.run_steps(2);
-    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop_mode), "crop mode entered");
+    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_some()), "crop mode entered");
 
     let smaller = egui::Rect::from_center_size(c, egui::vec2(40.0, 40.0));
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_rect = Some(smaller);
+    set_crop_box(&mut h, smaller);
     h.key_press(egui::Key::Enter);
     h.run_steps(4);
-    assert!(!h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop_mode), "crop mode exited");
+    assert!(!h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_some()), "crop mode exited");
 
     let images_after_crop = h.state().session.get(id).unwrap().page_images(0);
     assert!(images_after_crop[0].visible_rect.is_some());
@@ -7881,12 +7892,11 @@ fn crop_action_pills_interactive_and_apply_cancel_reset() {
     let doc_id = h.state().views[0].id;
     let original_rect = h.state().session.get(doc_id).unwrap().page_images(0)[0].rect;
     h.state_mut().views[0].image_selection.as_mut().unwrap().crop = Some(pdfcraft_ui_egui::CropMode::new(original_rect));
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_mode = true;
     h.run_steps(2);
 
     // Set smaller crop rect (50x50 in center)
     let smaller = egui::Rect::from_center_size(c, egui::vec2(50.0, 50.0));
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_rect = Some(smaller);
+    set_crop_box(&mut h, smaller);
     h.run_steps(2);
 
     let pill_y = smaller.max.y + 17.0;
@@ -7903,13 +7913,12 @@ fn crop_action_pills_interactive_and_apply_cancel_reset() {
     // Click Cancel pill: exits crop mode without applying changes
     click_at(&mut h, cancel_pos);
     h.run_steps(3);
-    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_none() && !s.crop_mode), "Cancel exits crop mode");
+    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_none()), "Cancel exits crop mode");
     assert_eq!(h.state().session.get(doc_id).unwrap().page_images(0)[0].visible_rect, Some(original_rect), "image is uncropped");
 
     // Re-enter crop mode and set crop rect
     h.state_mut().views[0].image_selection.as_mut().unwrap().crop = Some(pdfcraft_ui_egui::CropMode::new(original_rect));
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_mode = true;
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_rect = Some(smaller);
+    set_crop_box(&mut h, smaller);
     h.run_steps(2);
 
     // Click "Remove Crop" pill
@@ -7923,13 +7932,13 @@ fn crop_action_pills_interactive_and_apply_cancel_reset() {
     assert_eq!(current_keep, original_rect, "Remove Crop restored crop to full bounds");
 
     // Re-set smaller crop and click "Done" pill to apply
-    h.state_mut().views[0].image_selection.as_mut().unwrap().crop_rect = Some(smaller);
+    set_crop_box(&mut h, smaller);
     h.run_steps(2);
     let done_pos_after = egui::pos2(smaller.max.x - 20.0, pill_y);
     click_at(&mut h, done_pos_after);
     h.run_steps(4);
 
-    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_none() && !s.crop_mode), "Done exits crop mode");
+    assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_none()), "Done exits crop mode");
     let after_images = h.state().session.get(doc_id).unwrap().page_images(0);
     assert_ne!(after_images[0].visible_rect, Some(original_rect), "crop was applied");
 }

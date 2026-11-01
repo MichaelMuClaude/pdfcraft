@@ -1713,7 +1713,7 @@ fn page_tool_input(ui: &mut egui::Ui, view: &mut DocView, frame: &mut PageFrame<
             info,
             allow_interaction: !others_own_pointer && (matches!(view.router.owner(i), Some(crate::page_router::Owner::Picture { .. })) || !text_used),
         };
-        let image_used = crate::edit_text_ui::image_input(&image_cx, &images, view, &mut frame.out.image_action);
+        let image_used = crate::edit_text_ui::image_input(&image_cx, &images, view);
         !others_own_pointer && (text_used || image_used)
     };
     let on_link = tool == QuickTool::Link && can_modify && crate::link_ui::page_input(cx, doc_links, view);
@@ -3959,8 +3959,6 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
                 let images = d.page_images(s.page);
                 if let Some(im) = images.get(s.index) {
                     s.crop = Some(crate::edit_text_ui::CropMode::new(im.visible_rect.unwrap_or(im.rect)));
-                    s.crop_mode = true;
-                    s.crop_rect = None;
                 }
             }
         }
