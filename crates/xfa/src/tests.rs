@@ -4288,6 +4288,25 @@ fn a_draw_turns_about_each_of_the_nine_anchors() {
     }
 }
 
+/// A draw that stands past the edge of the page once turned stays where it turned to: nothing moves
+/// it back or cuts it, as for an upright one. From the page's top left corner of the content area
+/// it goes off to the left and above the page, and from its right side, off to the right.
+#[test]
+fn a_turned_draw_stands_past_the_edge_of_the_page() {
+    for (x, rotate, anchor, by) in [("0in", "180", 18.0, (-50.4, 28.8)), ("8in", "90", 594.0, (28.8, 50.4))] {
+        let draw = line_draw(x, "0in", &format!(r#"rotate="{rotate}""#));
+        let (doc, page) = written(&form_of_draws("", &draw));
+        let content = page_content(&doc, &page);
+        assert!(!content.split_whitespace().any(|t| t == "W" || t == "W*"), "{rotate}: nothing clips it: {content}");
+        let lines = stroked_lines(&content);
+        assert_eq!(lines.len(), 1, "{rotate}: {lines:?}");
+        let [from, to] = lines[0];
+        assert!((from.0 - anchor).abs() < 0.01 && (from.1 - 774.0).abs() < 0.01, "{rotate}: {from:?}");
+        assert!((to.0 - (anchor + by.0)).abs() < 0.01 && (to.1 - (774.0 + by.1)).abs() < 0.01, "{rotate}: {to:?}");
+        assert!(to.0 < 0.0 || to.0 > 612.0, "{rotate}: it does stand past the edge, at {to:?}");
+    }
+}
+
 /// Everything a draw shows turns with it, under one matrix: its text, its picture and its border,
 /// rounded or not, each written as if it stood upright.
 #[test]
