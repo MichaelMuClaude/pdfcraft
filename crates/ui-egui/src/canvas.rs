@@ -182,21 +182,7 @@ impl ImageObb {
         let v_axis = (c / h_v, d / h_v);
         let is_rotated = b.abs() > 1e-4 || c.abs() > 1e-4;
 
-        Self {
-            s00,
-            s10,
-            s11,
-            s01,
-            s_bc,
-            s_rc,
-            s_tc,
-            s_lc,
-            s_rot,
-            screen_center,
-            u_axis,
-            v_axis,
-            is_rotated,
-        }
+        Self { s00, s10, s11, s01, s_bc, s_rc, s_tc, s_lc, s_rot, screen_center, u_axis, v_axis, is_rotated }
     }
 
     pub fn from_image(im: &pdfcraft_engine::PageImage, xf: &PageXform, info: &DocInfo, page: usize) -> Self {
@@ -731,8 +717,8 @@ pub enum ViewAction {
 /// Default page right-click menu actions.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum PageMenuAction {
-    RotateCCW(usize),
-    RotateCW(usize),
+    RotateCCW,
+    RotateCW,
     Print,
     SelectTool,
     HandTool,
@@ -740,7 +726,7 @@ pub(crate) enum PageMenuAction {
     Copy,
     Paste(usize, [f64; 2]),
     AddComment(usize, [f64; 2]),
-    AddBookmark(usize),
+    AddBookmark,
     TakeSnapshot,
     EditPdf,
     AddText,
@@ -763,100 +749,66 @@ pub(crate) struct PageMenuPerms {
 }
 
 pub(crate) fn default_page_context_menu(ui: &mut egui::Ui, page: usize, at: [f64; 2], perms: PageMenuPerms, action: &mut Option<PageMenuAction>) {
+    use PageMenuAction as A;
+    // Takes `choice` when `entry` was clicked, and closes the menu.
+    let mut pick = |entry: egui::Response, ui: &mut egui::Ui, choice: PageMenuAction| {
+        if entry.clicked() {
+            *action = Some(choice);
+            ui.close();
+        }
+    };
+    let icon = |ui: &mut egui::Ui, name: &str, tip: &str| crate::icons::button(ui, name, 24.0, false, tip);
     // Top horizontal icon bar: Rotate CCW, Print, Select tool, Hand tool, Marquee Zoom
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        if crate::icons::button(ui, "rotate-ccw", 24.0, false, tl!("Rotate view counterclockwise")).clicked() {
-            *action = Some(PageMenuAction::RotateCCW(page));
-            ui.close();
-        }
-        ui.add_enabled_ui(perms.can_print, |ui| {
-            if crate::icons::button(ui, "printer", 24.0, false, tl!("Print")).clicked() {
-                *action = Some(PageMenuAction::Print);
-                ui.close();
-            }
-        });
-        if crate::icons::button(ui, "mouse-pointer-2", 24.0, false, tl!("Select Tool")).clicked() {
-            *action = Some(PageMenuAction::SelectTool);
-            ui.close();
-        }
-        if crate::icons::button(ui, "hand", 24.0, false, tl!("Hand Tool")).clicked() {
-            *action = Some(PageMenuAction::HandTool);
-            ui.close();
-        }
-        if crate::icons::button(ui, "zoom-in", 24.0, false, tl!("Marquee Zoom")).clicked() {
-            *action = Some(PageMenuAction::MarqueeZoom);
-            ui.close();
-        }
+        pick(icon(ui, "rotate-ccw", tl!("Rotate view counterclockwise")), ui, A::RotateCCW);
+        ui.add_enabled_ui(perms.can_print, |ui| pick(icon(ui, "printer", tl!("Print")), ui, A::Print));
+        pick(icon(ui, "mouse-pointer-2", tl!("Select Tool")), ui, A::SelectTool);
+        pick(icon(ui, "hand", tl!("Hand Tool")), ui, A::HandTool);
+        pick(icon(ui, "zoom-in", tl!("Marquee Zoom")), ui, A::MarqueeZoom);
     });
 
     ui.separator();
 
-    if ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Copy")).shortcut_text("Ctrl+C")).clicked() {
-        *action = Some(PageMenuAction::Copy);
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_paste, egui::Button::new(tl!("Paste")).shortcut_text("Ctrl+V")).clicked() {
-        *action = Some(PageMenuAction::Paste(page, at));
-        ui.close();
-    }
+    pick(
+        ui.add_enabled(
+            perms.can_copy,
+            egui::Button::new(tl!("Copy")).shortcut_text(crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY)),
+        ),
+        ui,
+        A::Copy,
+    );
+    pick(
+        ui.add_enabled(
+            perms.can_paste,
+            egui::Button::new(tl!("Paste")).shortcut_text(crate::commands::shortcut_label(ui.ctx(), pdfcraft_engine::commands::Shortcut::cmd("V"))),
+        ),
+        ui,
+        A::Paste(page, at),
+    );
 
     ui.separator();
 
-    if ui.add_enabled(perms.can_annotate, egui::Button::new(tl!("Add comment"))).clicked() {
-        *action = Some(PageMenuAction::AddComment(page, at));
-        ui.close();
+    pick(ui.add_enabled(perms.can_annotate, egui::Button::new(tl!("Add comment"))), ui, A::AddComment(page, at));
+    if perms.has_annotations {
+        pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Flatten comments"))), ui, A::FlattenComments);
     }
-    if perms.has_annotations && ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Flatten comments"))).clicked() {
-        *action = Some(PageMenuAction::FlattenComments);
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Add bookmark"))).clicked() {
-        *action = Some(PageMenuAction::AddBookmark(page));
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Take a snapshot"))).clicked() {
-        *action = Some(PageMenuAction::TakeSnapshot);
-        ui.close();
-    }
+    pick(ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Add bookmark"))), ui, A::AddBookmark);
+    pick(ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Take a snapshot"))), ui, A::TakeSnapshot);
 
     ui.separator();
 
-    if ui.add_enabled(perms.can_modify, egui::Button::new(egui::RichText::new(tl!("Edit this PDF")).strong())).clicked() {
-        *action = Some(PageMenuAction::EditPdf);
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add text"))).clicked() {
-        *action = Some(PageMenuAction::AddText);
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add image"))).clicked() {
-        *action = Some(PageMenuAction::AddImage);
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Delete page"))).clicked() {
-        *action = Some(PageMenuAction::DeletePage(page));
-        ui.close();
-    }
-    if ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Export this PDF"))).clicked() {
-        *action = Some(PageMenuAction::ExportPdf);
-        ui.close();
-    }
+    pick(ui.add_enabled(perms.can_modify, egui::Button::new(egui::RichText::new(tl!("Edit this PDF")).strong())), ui, A::EditPdf);
+    pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add text"))), ui, A::AddText);
+    pick(ui.add_enabled(perms.can_modify, egui::Button::new(tl!("Add image"))), ui, A::AddImage);
+    pick(ui.add_enabled(perms.can_assemble, egui::Button::new(tl!("Delete page"))), ui, A::DeletePage(page));
+    pick(ui.add_enabled(perms.can_copy, egui::Button::new(tl!("Export this PDF"))), ui, A::ExportPdf);
 
     ui.separator();
 
-    if ui.button(tl!("Find text or tools")).clicked() {
-        *action = Some(PageMenuAction::Find);
-        ui.close();
-    }
-    if ui.button(tl!("Rotate view clockwise")).clicked() {
-        *action = Some(PageMenuAction::RotateCW(page));
-        ui.close();
-    }
-    if ui.button(tl!("Document properties…")).clicked() {
-        *action = Some(PageMenuAction::DocProperties);
-        ui.close();
-    }
+    pick(ui.button(tl!("Find text or tools")), ui, A::Find);
+    pick(ui.button(tl!("Rotate view clockwise")), ui, A::RotateCW);
+    pick(ui.button(tl!("Document properties…")), ui, A::DocProperties);
 }
 
 impl DocView {
@@ -3951,17 +3903,6 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
                 }
             }
         }
-        Some(crate::edit_text_ui::ImageAction::Crop) => {
-            let doc_id = app.views[index].id;
-            if let Some(s) = app.views[index].image_selection.as_mut()
-                && let Some(d) = app.session.get(doc_id)
-            {
-                let images = d.page_images(s.page);
-                if let Some(im) = images.get(s.index) {
-                    s.crop = Some(crate::edit_text_ui::CropMode::new(im.visible_rect.unwrap_or(im.rect)));
-                }
-            }
-        }
         None => {}
     }
     match page_action {
@@ -3980,12 +3921,10 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
         Some(PageMenuAction::Paste(page, at)) => {
             app.paste_image_at(page, at);
         }
-        Some(PageMenuAction::RotateCCW(page)) => {
-            let _ = page;
+        Some(PageMenuAction::RotateCCW) => {
             app.views[index].rotate_view(false);
         }
-        Some(PageMenuAction::RotateCW(page)) => {
-            let _ = page;
+        Some(PageMenuAction::RotateCW) => {
             app.views[index].rotate_view(true);
         }
         Some(PageMenuAction::Print) => {
@@ -4008,7 +3947,7 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
             app.views[index].comments.selected = None;
             app.views[index].pending_edit = Some(pdfcraft_engine::Edit::Flatten { comments: true, fields: false });
         }
-        Some(PageMenuAction::AddBookmark(_page)) => {
+        Some(PageMenuAction::AddBookmark) => {
             app.bookmark_action(crate::panels::BmAction::New);
         }
         Some(PageMenuAction::TakeSnapshot) => {

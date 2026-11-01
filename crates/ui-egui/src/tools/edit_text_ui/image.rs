@@ -92,6 +92,11 @@ pub struct ImageSelection {
 }
 
 impl ImageSelection {
+    /// Select a page image without an active gesture.
+    pub fn at(page: usize, index: usize) -> Self {
+        Self { page, index, drag: None, crop: None, crop_mode: false, crop_rect: None, turning: false, settled: None }
+    }
+
     /// Cancel an in-progress text, rotation or crop drag and restore the crop it was previewing.
     pub(crate) fn cancel_pointer_gesture(&mut self) {
         self.drag = None;
@@ -489,7 +494,6 @@ pub enum ImageAction {
     Paste(usize, Option<[f64; 2]>),
     DrawFreehand,
     AddComment(usize, usize),
-    Crop,
 }
 
 /// Where the rotate knob sits, and the edge point its stem starts from: above the middle of the
@@ -1051,8 +1055,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
         _ => (resp.clicked() || resp.secondary_clicked()).then_some(hit),
     };
     if let Some(index) = clicked {
-        view.image_selection =
-            Some(ImageSelection { page, index, drag: None, crop: None, crop_mode: false, crop_rect: None, turning: false, settled: None });
+        view.image_selection = Some(ImageSelection::at(page, index));
     }
     if resp.secondary_clicked() {
         ui.ctx().data_mut(|d| d.insert_persisted(menu_key, true));
@@ -1076,133 +1079,114 @@ pub(crate) fn image_context_menu(
     use pdfcraft_engine::ImageEdit as E;
     let raster = !img.is_form;
 
-    let close = |ui: &mut egui::Ui| {
-        ui.ctx().data_mut(|d| d.insert_persisted(image_menu_id(), false));
-        egui::Popup::close_all(ui.ctx());
-        ui.close();
+    // Whether `entry` was clicked; a click closes the menu.
+    let picked = |ui: &mut egui::Ui, entry: egui::Response| {
+        let clicked = entry.clicked();
+        if clicked {
+            ui.ctx().data_mut(|d| d.insert_persisted(image_menu_id(), false));
+            egui::Popup::close_all(ui.ctx());
+            ui.close();
+        }
+        clicked
     };
+    let item = |ui: &mut egui::Ui, enabled: bool, label: &str| {
+        let entry = ui.add_enabled(enabled, egui::Button::new(label));
+        picked(ui, entry)
+    };
+    let edit = |change| Some(Edit::EditPageImage { page, index: hit, change });
 
     // Top horizontal icon bar: Comment, Crop, Rotate CCW, Rotate CW
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        if crate::icons::button(ui, "message-square", 24.0, false, tl!("Add a sticky note here")).clicked() {
+        let icon = |ui: &mut egui::Ui, name: &str, tip: &str| {
+            let entry = crate::icons::button(ui, name, 24.0, false, tip);
+            picked(ui, entry)
+        };
+        if icon(ui, "message-square", tl!("Add a sticky note here")) {
             *action = Some(ImageAction::AddComment(page, hit));
-            close(ui);
         }
-        if raster && crate::icons::button(ui, "crop", 24.0, false, tl!("Crop")).clicked() {
-            *action = Some(ImageAction::Crop);
-            if let Some(s) = view.image_selection.as_mut() {
-                let rect = img.visible_rect.unwrap_or(img.rect);
-                s.crop = Some(CropMode::new(rect));
-            }
-            close(ui);
+        if raster
+            && icon(ui, "crop", tl!("Crop"))
+            && let Some(s) = view.image_selection.as_mut()
+        {
+            s.crop = Some(CropMode::new(img.visible_rect.unwrap_or(img.rect)));
         }
-        if crate::icons::button(ui, "rotate-ccw", 24.0, false, tl!("Rotate Counterclockwise")).clicked() {
-            view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Rotate(3) });
-            close(ui);
+        if icon(ui, "rotate-ccw", tl!("Rotate Counterclockwise")) {
+            view.pending_edit = edit(E::Rotate(3));
         }
-        if crate::icons::button(ui, "rotate-cw", 24.0, false, tl!("Rotate Clockwise")).clicked() {
-            view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Rotate(1) });
-            close(ui);
+        if icon(ui, "rotate-cw", tl!("Rotate Clockwise")) {
+            view.pending_edit = edit(E::Rotate(1));
         }
     });
 
     ui.separator();
 
-    if ui.button(tl!("Cut Image")).clicked() {
+    if item(ui, true, tl!("Cut Image")) {
         *action = Some(ImageAction::Cut(page, hit));
-        close(ui);
     }
-    if ui.button(tl!("Copy Image")).clicked() {
+    if item(ui, true, tl!("Copy Image")) {
         *action = Some(ImageAction::Copy(page, hit));
-        close(ui);
     }
-    if ui.add_enabled(can_paste, egui::Button::new(tl!("Paste"))).clicked() {
+    if item(ui, can_paste, tl!("Paste")) {
         *action = Some(ImageAction::Paste(page, at));
-        close(ui);
     }
 
     ui.separator();
 
     let is_cropped = img.visible_rect.is_some() && img.visible_rect != Some(img.rect);
-    if raster && ui.add_enabled(is_cropped, egui::Button::new(tl!("Remove crop"))).clicked() {
-        view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::RemoveCrop });
-        close(ui);
+    if raster && item(ui, is_cropped, tl!("Remove crop")) {
+        view.pending_edit = edit(E::RemoveCrop);
     }
-
-    if ui.button(tl!("Flip horizontal")).clicked() {
-        view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Flip { horizontal: true } });
-        close(ui);
+    if item(ui, true, tl!("Flip horizontal")) {
+        view.pending_edit = edit(E::Flip { horizontal: true });
     }
-    if ui.button(tl!("Flip vertical")).clicked() {
-        view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Flip { horizontal: false } });
-        close(ui);
+    if item(ui, true, tl!("Flip vertical")) {
+        view.pending_edit = edit(E::Flip { horizontal: false });
     }
 
     ui.menu_button(tl!("Arrange image"), |ui| {
-        if ui.button(tl!("Bring to front")).clicked() {
-            view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Arrange(pdfcraft_engine::ArrangeOrder::BringToFront) });
-            close(ui);
-        }
-        if ui.button(tl!("Send to back")).clicked() {
-            view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Arrange(pdfcraft_engine::ArrangeOrder::SendToBack) });
-            close(ui);
-        }
-        if ui.button(tl!("Bring forward")).clicked() {
-            view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Arrange(pdfcraft_engine::ArrangeOrder::BringForward) });
-            close(ui);
-        }
-        if ui.button(tl!("Send backward")).clicked() {
-            view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Arrange(pdfcraft_engine::ArrangeOrder::SendBackward) });
-            close(ui);
+        use pdfcraft_engine::ArrangeOrder as A;
+        for (order, label) in [
+            (A::BringToFront, tl!("Bring to front")),
+            (A::SendToBack, tl!("Send to back")),
+            (A::BringForward, tl!("Bring forward")),
+            (A::SendBackward, tl!("Send backward")),
+        ] {
+            if item(ui, true, label) {
+                view.pending_edit = edit(E::Arrange(order));
+            }
         }
     });
 
-    if ui.add_enabled(raster, egui::Button::new(tl!("Replace image"))).clicked() {
+    if item(ui, raster, tl!("Replace image")) {
         *action = Some(ImageAction::Replace(page, hit));
-        close(ui);
     }
-    if ui.add_enabled(raster, egui::Button::new(tl!("Save Image As…"))).clicked() {
+    if item(ui, raster, tl!("Save Image As…")) {
         *action = Some(ImageAction::Save(page, hit));
-        close(ui);
     }
 
     ui.separator();
 
-    if ui.button(tl!("Draw freehand")).clicked() {
+    if item(ui, true, tl!("Draw freehand")) {
         *action = Some(ImageAction::DrawFreehand);
-        close(ui);
     }
-    if ui.button(tl!("Redact Image")).clicked() {
+    if item(ui, true, tl!("Redact Image")) {
         *action = Some(ImageAction::Redact(page, hit));
-        close(ui);
-    }
-    if ui.add_enabled(raster, egui::Button::new(tl!("Export image"))).clicked() {
-        *action = Some(ImageAction::Save(page, hit));
-        close(ui);
     }
 
     ui.separator();
 
-    if ui.button(tl!("Create Link…")).clicked() {
+    if item(ui, true, tl!("Create Link…")) {
         *action = Some(ImageAction::Link(page, hit));
-        close(ui);
     }
-
-    ui.menu_button(tl!("Edit image using"), |ui| {
-        ui.add_enabled(false, egui::Button::new(tl!("Default image editor")));
-    });
-
-    if ui.button(tl!("Recognize Text…")).clicked() {
+    if item(ui, true, tl!("Recognize Text…")) {
         *action = Some(ImageAction::Recognize(page));
-        close(ui);
     }
 
     ui.separator();
 
-    if ui.button(tl!("Delete")).clicked() {
+    if item(ui, true, tl!("Delete")) {
         view.image_selection = None;
-        view.pending_edit = Some(Edit::EditPageImage { page, index: hit, change: E::Delete });
-        close(ui);
+        view.pending_edit = edit(E::Delete);
     }
 }

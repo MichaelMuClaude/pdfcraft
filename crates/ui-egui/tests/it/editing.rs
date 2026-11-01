@@ -4616,9 +4616,7 @@ fn image_right_click_context_menu_items_and_actions() {
         "Replace image",
         "Draw freehand",
         "Redact Image",
-        "Export image",
         "Create Link",
-        "Edit image using",
         "Recognize Text",
     ] {
         h.get_by_label_contains(item);
