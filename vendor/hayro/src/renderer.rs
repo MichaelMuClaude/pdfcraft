@@ -401,6 +401,11 @@ fn may_paint_rect(rect: Rect, transform: Affine, width: u16, height: u16) -> boo
     paints_canvas(device, width, height)
 }
 
+/// PdfCraft patch: how far, in device pixels, the terms [`snap_minified_image`] drops may move an
+/// image's far edges: a hundredth of a pixel, which no edge shows. Rounding noise in a turned or
+/// scaled matrix stays far below it.
+const SNAP_SKEW: f64 = 0.01;
+
 /// PdfCraft patch: the whole-pixel device rectangle of a shrunk image whose axes lie along the
 /// device's, as `(width, height, transform)`: the size to shrink it to (along its own axes) and
 /// the transform that draws that raster 1:1, one source-axis step a whole device pixel. Upright,
@@ -408,7 +413,10 @@ fn may_paint_rect(rect: Rect, transform: Affine, width: u16, height: u16) -> boo
 /// turned) is drawn as sharply as upright (#5530). `transform` maps source pixels to device
 /// pixels and `planned` is the size [`image_resampling_size`] chose; `None` (draw as before) for
 /// skewed or freely rotated images, non-finite geometry, or a snapped size that strays more than
-/// a pixel from `planned` (so the memory budget that size passed still holds).
+/// a pixel from `planned` (so the memory budget that size passed still holds). An image counts
+/// as axis-aligned when the terms the snap drops move its far edges by at most [`SNAP_SKEW`]: a
+/// tolerance on the coefficients alone let a slight skew of a very wide image through, though it
+/// moved the far edge by more than a pixel.
 fn snap_minified_image(
     transform: &Affine,
     source: (u32, u32),
@@ -424,16 +432,17 @@ fn snap_minified_image(
     // Along an axis drawn backwards (negative scale), the raster starts at the span's far end.
     let start = |scale: f64, (lo, hi): (f64, f64)| if scale > 0.0 { lo } else { hi };
     let step = |scale: f64| if scale > 0.0 { 1.0 } else { -1.0 };
-    let upright = 1e-4 * a.abs().max(d.abs());
-    let turned = 1e-4 * b.abs().max(c.abs());
+    // How far a dropped term moves the image's far edge: `scale` across `side` source samples.
+    let negligible = |scale: f64, side: u32| (scale * f64::from(side)).abs() <= SNAP_SKEW;
+    let (width, height) = source;
     // Source x along device x, source y along device y (upright or mirrored), or a quarter turn:
     // source x along device y, source y along device x.
-    let (w, h, draw) = if b.abs() <= upright && c.abs() <= upright {
+    let (w, h, draw) = if negligible(b, width) && negligible(c, height) {
         let (x, y) = (edge(e, a, source.0)?, edge(f, d, source.1)?);
         // Bounded by the 1e6 check above, so the casts cannot saturate.
         let (w, h) = ((x.1 - x.0) as u32, (y.1 - y.0) as u32);
         (w, h, Affine::new([step(a), 0.0, 0.0, step(d), start(a, x), start(d, y)]))
-    } else if a.abs() <= turned && d.abs() <= turned {
+    } else if negligible(a, width) && negligible(d, height) {
         let (x, y) = (edge(e, c, source.1)?, edge(f, b, source.0)?);
         let (w, h) = ((y.1 - y.0) as u32, (x.1 - x.0) as u32);
         (w, h, Affine::new([0.0, step(b), step(c), 0.0, start(c, x), start(b, y)]))
@@ -1139,9 +1148,12 @@ impl Renderer {
             img_height as u16,
             may_have_transparency,
         );
+        // The snapped transform draws the raster 1:1, so it holds only if the shrink produced the
+        // snapped size. A failed resize hands back the source raster: drawn 1:1 it would come out
+        // at its source size, so it keeps the full transform instead.
         let draw_transform = match snapped {
-            Some((_, _, draw)) => draw,
-            None => cur_transform * additional_transform,
+            Some((w, h, draw)) if (img_width, img_height) == (w, h) => draw,
+            _ => cur_transform * additional_transform,
         };
         self.draw_pixmap(Arc::new(pixmap), quality, draw_transform);
     }
@@ -2597,4 +2609,29 @@ pub fn tiling_cell_pixels(scale: f32, step: f32, max_pixels: f32) -> (u16, f64) 
     // `pixels` is in 1..=u16::MAX, so the cast is exact; `step` is positive and finite here
     // (`exact` is), so the division is too.
     (pixels as u16, pixels / step)
+}
+
+#[cfg(test)]
+mod snap_tests {
+    use super::{snap_minified_image, Affine};
+
+    /// The skew a snap drops is measured as the distance it moves the image's far edge, not as a
+    /// coefficient against the scale: a 40 000 sample wide image skewed by 4e-5 per sample moves
+    /// its far edge 1.6 device pixels, and must keep its full transform (#5640 review).
+    #[test]
+    fn a_skew_that_moves_a_far_edge_is_not_snapped() {
+        let source = (40_000, 400);
+        let planned = (20_000, 200);
+        // Upright, shrunk to half, sheared so the far end sits 1.6 pixels lower: not snapped.
+        let skewed = Affine::new([0.5, 4e-5, 0.0, 0.5, 0.3, 0.3]);
+        assert!(snap_minified_image(&skewed, source, planned).is_none());
+        // A quarter turn with the same stray term along device x: not snapped either.
+        let turned = Affine::new([4e-5, 0.5, -0.5, 0.0, 200.3, 0.3]);
+        assert!(snap_minified_image(&turned, source, (20_000, 200)).is_none());
+        // Rounding noise far below a hundredth of a pixel at the far edge still snaps.
+        let noisy = Affine::new([0.5, 1e-9, 0.0, 0.5, 0.3, 0.3]);
+        assert!(snap_minified_image(&noisy, source, planned).is_some());
+        let turned_noisy = Affine::new([1e-9, 0.5, -0.5, 0.0, 200.3, 0.3]);
+        assert!(snap_minified_image(&turned_noisy, source, (20_000, 200)).is_some());
+    }
 }
