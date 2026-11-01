@@ -62,9 +62,6 @@ pub(crate) fn mark_source(doc: &mut pdfcraft_cos::Document, f: &MarkFile) -> Res
 
 /// The dimensions of an image from its bytes (JPEG, PNG, TIFF), without decoding the full raster.
 pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() > 64_000_000 * 4 {
-        return None;
-    }
     let format = image::guess_format(bytes).ok()?;
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
@@ -123,11 +120,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_and_oversized_inputs_return_none() {
+    fn invalid_inputs_return_none() {
         assert_eq!(image_dimensions(&[]), None);
         assert_eq!(image_dimensions(b"not an image"), None);
-
-        let huge = vec![0u8; 64_000_000 * 4 + 1];
-        assert_eq!(image_dimensions(&huge), None);
     }
 }

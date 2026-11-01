@@ -89,14 +89,11 @@ pub fn discover_budgeted(roots: &[PathBuf], mut budget: u64) -> Vec<FontFile> {
     files
 }
 
-fn font_content_key(bytes: &[u8]) -> (usize, u64, u64) {
+fn font_content_key(bytes: &[u8]) -> (usize, u64) {
     use std::hash::{DefaultHasher, Hasher};
-    let mut h1 = DefaultHasher::new();
-    h1.write(bytes);
-    let mut h2 = DefaultHasher::new();
-    h2.write_u8(0xff);
-    h2.write(bytes);
-    (bytes.len(), h1.finish(), h2.finish())
+    let mut h = DefaultHasher::new();
+    h.write(bytes);
+    (bytes.len(), h.finish())
 }
 fn font_extension(path: &Path) -> bool {
     path.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
