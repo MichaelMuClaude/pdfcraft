@@ -7396,8 +7396,10 @@ fn image_copy_cut_paste_keyboard_and_context_menu() {
     h.run_steps(2);
     assert!(h.state().last_copied_image.is_some(), "image copied to clipboard buffer");
 
-    // 3. Paste via keyboard shortcut (COMMAND+V / Event::Paste)
-    h.event(egui::Event::Paste("".into()));
+    // 3. The integration delivers the copied pixels for the keyboard paste.
+    let (width, height, rgba) = h.state().last_copied_image.clone().unwrap();
+    let image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
+    h.event(egui::Event::PasteImage(std::sync::Arc::new(image)));
     h.run_steps(3);
     let after_paste = h.state().session.get(id).unwrap().page_images(0).len();
     assert_eq!(after_paste, 2, "now has 2 images");
@@ -7506,11 +7508,11 @@ fn stale_clipboard_plain_text_does_not_paste_image() {
     assert_eq!(doc.page_images(0).len(), 0, "no image pasted on the page");
 }
 
-/// Issue 1: V key release with COMMAND delivers exactly one paste (not two).
+/// Delivered image pixels paste once; accompanying key releases add no second image.
 #[test]
-fn paste_key_release_delivers_single_image() {
+fn delivered_image_with_key_releases_pastes_once() {
     let pdf = include_bytes!("../data/form.pdf").to_vec();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+    let mut h = Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").unwrap();
         app.system_clipboard = false;
@@ -7526,19 +7528,23 @@ fn paste_key_release_delivers_single_image() {
 
     h.state_mut().clipboard_override = Some(pdfcraft_ui_egui::Clip::Image { width: 40, height: 20, rgba: [100u8, 200, 100, 255].repeat(40 * 20) });
 
-    // Inject only a V release with COMMAND (no press event), exactly as egui-winit delivers
+    // The integration supplies the pixels and consumes native shortcut keys. Extra releases carry no paste authority.
+    h.event(egui::Event::PasteImage(std::sync::Arc::new(egui::ColorImage::filled([40, 20], egui::Color32::GREEN))));
     h.event(egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND });
     h.run_steps(3);
 
     let count = h.state().session.get(id).unwrap().page_images(0).len();
-    assert_eq!(count, initial_count + 1, "exactly one image must be pasted on V release, got {count}");
+    assert_eq!(count, initial_count + 1, "exactly one image must be pasted for delivered pixels, got {count}");
+    h.event(egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(2);
+    assert_eq!(h.state().session.get(id).unwrap().page_images(0).len(), initial_count + 1);
 }
 
 /// Win+V release without COMMAND must NOT paste an image.
 #[test]
 fn win_v_does_not_paste_on_open() {
     let pdf = include_bytes!("../data/form.pdf").to_vec();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+    let mut h = Harness::builder().with_step_dt(1.0 / 60.0).with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").unwrap();
         app.system_clipboard = false;
@@ -7553,6 +7559,12 @@ fn win_v_does_not_paste_on_open() {
     let initial_count = h.state().session.get(id).unwrap().page_images(0).len();
 
     h.state_mut().clipboard_override = Some(pdfcraft_ui_egui::Clip::Image { width: 40, height: 20, rgba: [100u8, 200, 100, 255].repeat(40 * 20) });
+
+    // Complete an intentional paste immediately before opening clipboard history.
+    h.event(egui::Event::PasteImage(std::sync::Arc::new(egui::ColorImage::filled([40, 20], egui::Color32::GREEN))));
+    h.event(egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND });
+    h.run_steps(1);
+    assert_eq!(h.state().session.get(id).unwrap().page_images(0).len(), initial_count + 1);
 
     // Simulate pressing Win+V (opening clipboard history flyout):
     // The OS intercepts V press, so PdfCraft only sees V release without COMMAND (Modifiers::NONE).
@@ -7560,14 +7572,15 @@ fn win_v_does_not_paste_on_open() {
     h.run_steps(2);
 
     let count = h.state().session.get(id).unwrap().page_images(0).len();
-    assert_eq!(count, initial_count, "Win+V release without command must NOT paste an image");
+    assert_eq!(count, initial_count + 1, "opening Win+V after a completed paste must not paste again");
 
-    // Then user selects the image in the Win+V flyout: Windows injects synthetic Ctrl+V (release with COMMAND)
+    // Choosing an item delivers another image, possibly alongside synthetic shortcut events.
+    h.event(egui::Event::PasteImage(std::sync::Arc::new(egui::ColorImage::filled([40, 20], egui::Color32::GREEN))));
     h.event(egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND });
     h.run_steps(3);
 
     let final_count = h.state().session.get(id).unwrap().page_images(0).len();
-    assert_eq!(final_count, initial_count + 1, "Win+V paste must deliver exactly one image, not two");
+    assert_eq!(final_count, initial_count + 2, "the two intentional deliveries must paste exactly two images");
 }
 
 /// Normal Ctrl+V press followed by release delivers exactly one image, not two.

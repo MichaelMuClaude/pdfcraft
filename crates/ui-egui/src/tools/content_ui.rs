@@ -1029,32 +1029,6 @@ impl crate::PdfCraftApp {
         }
     }
 
-    /// Whether ⌘V / Ctrl+V was let go this frame. egui-winit swallows that press (with a Paste
-    /// event only if the clipboard holds text), while a plain V press always comes through: a
-    /// release of V with no press of V since the last one is the shortcut, even when ⌘ or Ctrl
-    /// was let go first. Read every frame, dialogs or not, so a press is never missed.
-    pub(crate) fn paste_key_released(&mut self, ctx: &egui::Context) -> bool {
-        let mut released = false;
-        ctx.input(|inp| {
-            for e in &inp.events {
-                if let egui::Event::Key { key: egui::Key::V, pressed, modifiers, .. } = e {
-                    if modifiers.command {
-                        self.last_command_time = Some(inp.time);
-                    } else if *pressed {
-                        self.last_command_time = None;
-                    }
-                    let command_recent = self.last_command_time.is_some_and(|t| inp.time >= t && inp.time - t < 0.35);
-                    let command_active = modifiers.command || command_recent;
-                    if !*pressed && !self.v_pressed && command_active {
-                        released = true;
-                    }
-                    self.v_pressed = *pressed;
-                }
-            }
-        });
-        released
-    }
-
     /// Whether there is an image in the in-memory clipboard or system clipboard ready to paste.
     pub fn can_paste_image(&self) -> bool {
         if let Some(crate::create_ui::Clip::Image { .. }) = self.clipboard_override.as_ref() {
@@ -1072,6 +1046,26 @@ impl crate::PdfCraftApp {
         self.last_copied_image.is_some() || self.last_copied_file.is_some()
     }
 
+    /// Paste the integration's delivered pixels without rereading a clipboard that may have changed.
+    pub(crate) fn paste_received_image(&mut self, page: usize, image: &egui::ColorImage) -> bool {
+        let [width, height] = image.size;
+        let pixels = width.checked_mul(height);
+        let bytes = pixels.and_then(|n| n.checked_mul(4));
+        if width == 0
+            || height == 0
+            || width > crate::create_ui::MAX_IMAGE_SIDE
+            || height > crate::create_ui::MAX_IMAGE_SIDE
+            || pixels != Some(image.pixels.len())
+            || bytes.is_none_or(|n| n > crate::create_ui::MAX_IMAGE_BYTES)
+        {
+            self.notify_error("the clipboard image is empty, malformed or exceeds size limits");
+            return false;
+        }
+        let rgba = image.pixels.iter().flat_map(egui::Color32::to_srgba_unmultiplied).collect();
+        let delivered = crate::create_ui::Clip::Image { width, height, rgba };
+        self.paste_image_with_system(page, None, None, None, false, Some(delivered))
+    }
+
     /// Paste an image from the clipboard onto `page`.
     pub fn paste_image(&mut self, page: usize, rect: Option<[f64; 4]>) -> bool {
         self.paste_image_internal(page, rect, None)
@@ -1087,7 +1081,14 @@ impl crate::PdfCraftApp {
         let system = if self.clipboard_override.is_none() && self.system_clipboard { crate::os_clipboard::for_image_paste() } else { None };
         #[cfg(target_arch = "wasm32")]
         let system = None;
-        self.paste_image_with_system(page, rect, at, system, cfg!(not(target_arch = "wasm32")) && self.system_clipboard)
+        self.paste_image_with_system(
+            page,
+            rect,
+            at,
+            system,
+            cfg!(not(target_arch = "wasm32")) && self.system_clipboard,
+            self.clipboard_override.clone(),
+        )
     }
 
     fn paste_image_with_system(
@@ -1097,6 +1098,7 @@ impl crate::PdfCraftApp {
         at: Option<[f64; 2]>,
         system: Option<crate::create_ui::Clip>,
         system_authoritative: bool,
+        clipboard: Option<crate::create_ui::Clip>,
     ) -> bool {
         let Some((i, id)) = self.active_ids() else {
             return false;
@@ -1108,7 +1110,7 @@ impl crate::PdfCraftApp {
             return false;
         }
 
-        let image_data: Option<(String, Vec<u8>)> = match self.clipboard_override.clone() {
+        let image_data: Option<(String, Vec<u8>)> = match clipboard {
             Some(crate::create_ui::Clip::Image { width, height, rgba }) => {
                 let is_same = self
                     .last_copied_image
@@ -1308,35 +1310,28 @@ mod tests {
 
     use super::*;
 
-    fn review_v_release(app: &mut crate::PdfCraftApp, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) -> bool {
-        let mut paste = false;
-        ctx.run_ui(egui::RawInput { time: Some(time), events, ..Default::default() }, |ui| {
-            paste = app.paste_key_released(ui.ctx());
-        })
-        .drop_without_applying_deltas();
-        paste
-    }
-
-    fn review_key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
-        egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+    #[test]
+    fn delivered_pixels_are_bounded_before_cache_or_document_changes() {
+        let mut app = crate::PdfCraftApp::new();
+        app.create_blank();
+        app.last_copied_image = Some((1, 1, vec![0, 255, 0, 255]));
+        let before = app.last_copied_image.clone();
+        for size in [[0, 1], [usize::MAX, 2], [crate::create_ui::MAX_IMAGE_SIDE + 1, 1], [2, 2]] {
+            let mut image = egui::ColorImage::filled([1, 1], egui::Color32::RED);
+            image.size = size;
+            assert!(!app.paste_received_image(0, &image));
+            assert_eq!(app.last_copied_image, before);
+        }
+        assert!(app.session.get(app.views[0].id).unwrap().page_images(0).is_empty());
     }
 
     #[test]
-    fn review_plain_v_after_another_shortcut_does_not_paste() {
+    fn delivered_pixels_keep_unpremultiplied_alpha() {
         let mut app = crate::PdfCraftApp::new();
-        let ctx = egui::Context::default();
-        review_v_release(
-            &mut app,
-            &ctx,
-            1.0,
-            vec![egui::Event::ModifiersChanged(egui::Modifiers::COMMAND), review_key(egui::Key::C, true, egui::Modifiers::COMMAND)],
-        );
-        assert!(!review_v_release(
-            &mut app,
-            &ctx,
-            1.1,
-            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE), review_key(egui::Key::V, false, egui::Modifiers::NONE)]
-        ));
+        app.create_blank();
+        let image = egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255, 0, 0, 128]);
+        assert!(app.paste_received_image(0, &image));
+        assert_eq!(app.last_copied_image.unwrap().2, vec![255, 0, 0, 128]);
     }
 
     #[test]
@@ -1345,7 +1340,7 @@ mod tests {
         app.create_blank();
         app.system_clipboard = true;
         app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
-        assert!(app.paste_image_with_system(0, None, None, None, false));
+        assert!(app.paste_image_with_system(0, None, None, None, false, None));
         let id = app.active_ids().unwrap().1;
         assert_eq!(app.session.get(id).unwrap().page_images(0).len(), 1);
     }
@@ -1356,7 +1351,7 @@ mod tests {
         app.create_blank();
         app.system_clipboard = true;
         app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
-        assert!(!app.paste_image_with_system(0, None, None, None, true));
+        assert!(!app.paste_image_with_system(0, None, None, None, true, None));
     }
 
     #[test]
@@ -1392,34 +1387,10 @@ mod tests {
         let id = app.active_ids().unwrap().1;
         app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
         let undo = app.session.get(id).unwrap().can_undo().map(str::to_owned);
-        assert!(!app.paste_image_with_system(0, None, Some([20.0, 20.0]), Some(crate::create_ui::Clip::Text("new text".into())), true));
+        assert!(!app.paste_image_with_system(0, None, Some([20.0, 20.0]), Some(crate::create_ui::Clip::Text("new text".into())), true, None));
         assert_eq!(app.session.get(id).unwrap().can_undo().map(str::to_owned), undo);
         assert!(app.session.get(id).unwrap().page_images(0).is_empty());
         assert!(app.last_copied_image.is_none());
-    }
-
-    #[test]
-    fn a_plain_v_release_long_after_command_is_not_a_paste() {
-        let mut app = crate::PdfCraftApp::new();
-        let ctx = egui::Context::default();
-        app.last_command_time = Some(1.0);
-        ctx.run_ui(
-            egui::RawInput {
-                time: Some(10.0),
-                events: vec![egui::Event::Key {
-                    key: egui::Key::V,
-                    physical_key: None,
-                    pressed: false,
-                    repeat: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-                ..Default::default()
-            },
-            |ui| {
-                assert!(!app.paste_key_released(ui.ctx()), "elapsed time expires command even if no frames were drawn");
-            },
-        )
-        .drop_without_applying_deltas();
     }
 
     /// The image a flip button leaves behind, as the panel returns it.

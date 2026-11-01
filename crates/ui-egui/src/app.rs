@@ -230,8 +230,6 @@ impl PdfCraftApp {
             last_copied_file: None,
             system_clipboard: true,
             clipboard_override: None,
-            v_pressed: false,
-            last_command_time: None,
             attach_override: None,
             duplicate_draft: None,
             page_props_draft: None,
