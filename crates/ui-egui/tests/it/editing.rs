@@ -9289,3 +9289,79 @@ fn escape_in_an_open_paragraph_selects_its_box_for_delete() {
         assert_eq!(blocks(&h)[0].text, "Page 1");
     }
 }
+
+#[test]
+fn outward_image_grip_drags_grow_on_rotated_pages() {
+    for rotation in [0, 90, 180, 270] {
+        for image_turn in [0.0, 25.0] {
+            for grip in 0..8 {
+                let mut png = Vec::new();
+                image::RgbImage::from_pixel(100, 80, image::Rgb([100, 150, 200]))
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .unwrap();
+                let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
+                    let mut app = PdfCraftApp::new();
+                    app.set_option("language", "en").unwrap();
+                    app.open_bytes("grips.png", None, png.clone()).unwrap();
+                    app
+                });
+                h.run_steps(4);
+                h.state_mut().apply_edit(pdfcraft_engine::Edit::EditPageImage {
+                    page: 0,
+                    index: 0,
+                    change: pdfcraft_engine::ImageEdit::Move([20.0, 20.0, 80.0, 60.0]),
+                });
+                h.state_mut().apply_edit(pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: rotation });
+                if image_turn != 0.0 {
+                    h.state_mut().apply_edit(pdfcraft_engine::Edit::EditPageImage {
+                        page: 0,
+                        index: 0,
+                        change: pdfcraft_engine::ImageEdit::RotateBy(image_turn),
+                    });
+                }
+                h.state_mut().views[0].fit = pdfcraft_ui_egui::canvas::Fit::Page;
+                assert!(h.state_mut().execute("edit.edit_text"));
+                h.state_mut().views[0].image_selection = Some(pdfcraft_ui_egui::ImageSelection::at(0, 0));
+                h.run_steps(3);
+                let view = &h.state().views[0];
+                let doc = h.state().session.get(view.id).unwrap();
+                let before = doc.page_images(0)[0].clone();
+                let obb = pdfcraft_ui_egui::canvas::ImageObb::from_image(&before, &view.page_xform(0).unwrap(), &doc.info, 0);
+                let (handle, start) = obb.handles()[grip];
+                let opposite = obb.handles()[(grip + 4) % 8].0;
+                let finish = start + (start - obb.screen_center) * 0.15;
+                assert!(view.viewport_rect().contains(start) && view.viewport_rect().contains(finish), "test grips must be visible");
+                h.hover_at(start);
+                h.run_steps(1);
+                h.drag_at(start);
+                h.run_steps(1);
+                let started = h.state().views[0].image_selection.clone();
+                h.hover_at(finish);
+                h.run_steps(2);
+                let moved = h.state().views[0].image_selection.clone();
+                h.drop_at(finish);
+                h.run_steps(3);
+                let view = &h.state().views[0];
+                let doc = h.state().session.get(view.id).unwrap();
+                let images = doc.page_images(0);
+                let after = &images[0];
+                let after_obb = pdfcraft_ui_egui::canvas::ImageObb::from_image(after, &view.page_xform(0).unwrap(), &doc.info, 0);
+                assert!(
+                    after_obb.handle_pos(opposite).distance(obb.handle_pos(opposite)) < 1.0,
+                    "fixed grip moved: rotation={rotation} image_turn={image_turn} grip={grip}"
+                );
+                assert!(
+                    after_obb.handle_pos(handle).distance(finish) < 1.0,
+                    "dragged grip missed pointer: rotation={rotation} image_turn={image_turn} grip={grip}"
+                );
+                let area = |m: [f64; 6]| (m[0] * m[3] - m[1] * m[2]).abs();
+                assert!(
+                    area(after.matrix) > area(before.matrix) * 1.05,
+                    "outward grip shrank or ignored: rotation={rotation} image_turn={image_turn} grip={grip}: {:?} => {:?}; started={started:?} moved={moved:?}",
+                    before.matrix,
+                    after.matrix
+                );
+            }
+        }
+    }
+}

@@ -1,5 +1,5 @@
 use super::{ACCENT, Color32, CornerRadius, DocInfo, DocView, Edit, MAX_OUTLINES, PagePointer, PageXform, Pos2, Rect, Stroke, pos2, user_box};
-use crate::canvas::{ImageObb, PainterExt};
+use crate::canvas::{ImageObb, PainterExt, image_screen_rect};
 use crate::image_engine::{CROP_ACCENT, apply_crop, apply_resize, apply_resize_proportional, draw_handle, draw_rule_of_thirds};
 use crate::page_cursor::Layer;
 use crate::page_router::{Hit, Owner, PicturePart};
@@ -319,7 +319,6 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     let done_resp = ui.interact(done, done_id, egui::Sense::click());
     let cancel_resp = ui.interact(cancel, cancel_id, egui::Sense::click());
     let reset_resp = reset.map(|r| ui.interact(r, reset_id, egui::Sense::click()));
-
     let t = crate::theme::Tokens::get(ui.ctx());
 
     // Done button (accent colored)
@@ -450,14 +449,16 @@ pub(crate) fn handle_hit(
     p: Pos2,
 ) -> Option<Hit> {
     let s = view.image_selection.as_ref().filter(|s| s.page == page && s.crop.is_none())?;
-    let b = images.get(s.index)?.visible_rect.map(|r| xf.user_rect(info, page, r.map(|v| v as f32)))?;
+    let image = images.get(s.index)?;
+    let b = image_screen_rect(image, xf, info, page);
+    let obb = ImageObb::from_image(image, xf, info, page);
     let picture = |part| Owner::Picture { index: s.index, part };
-    if rotate_knob(b, clip).0.distance(p) < 8.0 {
+    let knob = if obb.is_rotated { obb.s_rot } else { rotate_knob(b, clip).0 };
+    if knob.distance(p) < 8.0 {
         return Some(Hit::new(picture(PicturePart::Knob), Layer::Handle, egui::CursorIcon::Grab));
     }
-    let corner = [b.left_top(), b.right_top(), b.left_bottom(), b.right_bottom()].iter().position(|c| c.distance(p) < 8.0)?;
-    let icon = if matches!(corner, 0 | 3) { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::ResizeNeSw };
-    Some(Hit::new(picture(PicturePart::Corner(corner)), Layer::Handle, icon))
+    let (grip, (handle, _)) = obb.handles().into_iter().enumerate().find(|(_, (_, point))| point.distance(p) < 8.0)?;
+    Some(Hit::new(picture(PicturePart::Corner(grip)), Layer::Handle, obb.handle_cursor(handle)))
 }
 
 /// The picture under `p` (its shape, not only its box): a click selects it, a drag moves the
@@ -619,6 +620,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             return crop_input(cx, view, i, image);
         }
         let (knob, stem) = rotate_knob(b, ui.clip_rect());
+        let shown_knob = if obb.is_rotated { obb.s_rot } else { knob };
         if view.image_selection.as_ref().is_some_and(|s| s.drag.is_none()) {
             picture_frame(painter, &obb, b, Color32::TRANSPARENT, Stroke::new(1.5, ACCENT));
             if obb.is_rotated {
@@ -643,31 +645,15 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             }
         }
         let rot_id = ui.scope_id().with("img_handle").with(8);
-        let rot_rect = Rect::from_center_size(if obb.is_rotated { obb.s_rot } else { knob }, egui::vec2(12.0, 12.0));
+        let rot_rect = Rect::from_center_size(shown_knob, egui::vec2(12.0, 12.0));
         let rot_resp = ui.interact(rot_rect, rot_id, egui::Sense::drag());
         let rot_drag = allow_interaction && rot_resp.drag_started();
 
         if allow_interaction && let Some(p) = hover_pos {
-            if obb.s_rot.distance(p) < 8.0 || knob.distance(p) < 8.0 {
+            if shown_knob.distance(p) < 8.0 {
                 view.cursor.claim(Layer::Handle, egui::CursorIcon::Grab);
             } else if let Some((h, _)) = obb.handles().iter().find(|(_, pos)| pos.distance(p) < 8.0) {
-                let icon = if obb.is_rotated {
-                    match h {
-                        ImageHandle::TopLeft | ImageHandle::TopRight | ImageHandle::BottomLeft | ImageHandle::BottomRight => {
-                            let v = obb.handle_pos(*h) - obb.screen_center;
-                            if v.x * v.y > 0.0 { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::ResizeNeSw }
-                        }
-                        ImageHandle::TopCenter | ImageHandle::BottomCenter if obb.v_axis.0.abs() > obb.v_axis.1.abs() => {
-                            egui::CursorIcon::ResizeHorizontal
-                        }
-                        ImageHandle::RightCenter | ImageHandle::LeftCenter if obb.u_axis.1.abs() > obb.u_axis.0.abs() => {
-                            egui::CursorIcon::ResizeVertical
-                        }
-                        _ => h.cursor_icon(),
-                    }
-                } else {
-                    h.cursor_icon()
-                };
+                let icon = obb.handle_cursor(*h);
                 view.cursor.claim(Layer::Handle, icon);
             }
         }
@@ -681,14 +667,14 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                 }
             } else if rot_drag {
                 if let Some(s) = view.image_selection.as_mut() {
-                    let o = origin.unwrap_or(if obb.is_rotated { obb.s_rot } else { knob });
+                    let o = origin.unwrap_or(shown_knob);
                     s.drag = Some(ImageDrag { start: o, target: DragTarget::Rotate, initial_rect: b, initial_matrix: image.matrix });
                     s.turning = true;
                 }
             } else if resp.drag_started()
                 && let Some(o) = origin
             {
-                if obb.s_rot.distance(o) < 8.0 || knob.distance(o) < 8.0 {
+                if shown_knob.distance(o) < 8.0 {
                     if let Some(s) = view.image_selection.as_mut() {
                         s.drag = Some(ImageDrag { start: o, target: DragTarget::Rotate, initial_rect: b, initial_matrix: image.matrix });
                         s.turning = true;
@@ -708,7 +694,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
         if view.image_selection.as_ref().is_some_and(|s| s.turning) {
             let shift = ui.input(|i| i.modifiers.shift);
             let centre = obb.screen_center;
-            let rot_knob = if obb.is_rotated { obb.s_rot } else { knob };
+            let rot_knob = shown_knob;
             let drag_start = view.image_selection.as_ref().and_then(|s| s.drag).map_or(rot_knob, |d| d.start);
             let degrees = hover_pos.map_or(0.0, |p| turn_degrees_delta(centre, drag_start, p, shift));
             let (sin, cos) = degrees.to_radians().sin_cos();
@@ -804,7 +790,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                 }
 
                 let icon = match drag.target {
-                    DragTarget::Handle(handle) => handle.cursor_icon(),
+                    DragTarget::Handle(handle) => obb.handle_cursor(handle),
                     DragTarget::Move => egui::CursorIcon::Grabbing,
                     _ => egui::CursorIcon::Move,
                 };
@@ -864,7 +850,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                     let offset_u = if u < 0.0 { new_w } else { 0.0 };
                     let offset_v = if v < 0.0 { new_h } else { 0.0 };
                     let p00_new = (anchor.0 - offset_u * u_axis.0 - offset_v * v_axis.0, anchor.1 - offset_u * u_axis.1 - offset_v * v_axis.1);
-                    let icon = handle.cursor_icon();
+                    let icon = obb.handle_cursor(handle);
                     let mat = Matrix([new_w * u_axis.0, new_w * u_axis.1, new_h * v_axis.0, new_h * v_axis.1, p00_new.0, p00_new.1]);
                     (mat, icon)
                 }
@@ -941,14 +927,11 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             painter.rect_stroke(b, CornerRadius::ZERO, Stroke::new(1.5, ACCENT.gamma_multiply(0.7)), egui::StrokeKind::Outside);
         }
     }
-    let corner = hit_obb.handles().iter().position(|(_, c)| c.distance(p) < 10.0);
-    let cursor = match (selected == Some(hit), corner) {
-        (true, Some(0 | 4)) => egui::CursorIcon::ResizeNwSe,
-        (true, Some(2 | 6)) => egui::CursorIcon::ResizeNeSw,
-        (true, Some(1 | 5)) => egui::CursorIcon::ResizeVertical,
-        (true, Some(3 | 7)) => egui::CursorIcon::ResizeHorizontal,
-        (true, None) => egui::CursorIcon::Grab,
-        _ => egui::CursorIcon::PointingHand,
+    let grip = hit_obb.handles().into_iter().find(|(_, point)| point.distance(p) < 10.0);
+    let cursor = if selected == Some(hit) {
+        grip.map_or(egui::CursorIcon::Grab, |(handle, _)| hit_obb.handle_cursor(handle))
+    } else {
+        egui::CursorIcon::PointingHand
     };
     view.cursor.claim(Layer::Text, cursor);
     let clicked = match view.router.owner(page) {
@@ -975,6 +958,7 @@ pub(crate) fn image_context_menu(
     can_paste: bool,
     action: &mut Option<ImageAction>,
     at: Option<[f64; 2]>,
+    rotation: u16,
 ) {
     let Some(img) = images.get(hit) else { return };
     use pdfcraft_engine::ImageEdit as E;
@@ -1039,10 +1023,10 @@ pub(crate) fn image_context_menu(
         view.pending_edit = edit(E::RemoveCrop);
     }
     if item(ui, true, tl!("Flip horizontal")) {
-        view.pending_edit = edit(E::Flip { horizontal: true });
+        view.pending_edit = edit(E::Flip { horizontal: flip_user_axis(true, rotation) });
     }
     if item(ui, true, tl!("Flip vertical")) {
-        view.pending_edit = edit(E::Flip { horizontal: false });
+        view.pending_edit = edit(E::Flip { horizontal: flip_user_axis(false, rotation) });
     }
 
     ui.menu_button(tl!("Arrange image"), |ui| {
@@ -1089,5 +1073,22 @@ pub(crate) fn image_context_menu(
     if item(ui, true, tl!("Delete")) {
         view.image_selection = None;
         view.pending_edit = edit(E::Delete);
+    }
+}
+
+fn flip_user_axis(horizontal: bool, rotation: u16) -> bool {
+    horizontal ^ (rotation % 180 == 90)
+}
+
+#[cfg(test)]
+mod screen_orientation_tests {
+    use super::*;
+
+    #[test]
+    fn flip_labels_follow_the_screen_axis() {
+        for rotation in [0, 90, 180, 270] {
+            assert_eq!(flip_user_axis(true, rotation), rotation % 180 == 0);
+            assert_eq!(flip_user_axis(false, rotation), rotation % 180 != 0);
+        }
     }
 }

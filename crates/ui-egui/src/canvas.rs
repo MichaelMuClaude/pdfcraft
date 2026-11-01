@@ -152,6 +152,21 @@ pub struct ImageObb {
 }
 
 impl ImageObb {
+    pub(crate) fn handle_cursor(&self, handle: ImageHandle) -> egui::CursorIcon {
+        let direction = self.handle_pos(handle) - self.screen_center;
+        match handle {
+            ImageHandle::TopLeft | ImageHandle::TopRight | ImageHandle::BottomLeft | ImageHandle::BottomRight => {
+                if direction.x * direction.y > 0.0 {
+                    egui::CursorIcon::ResizeNwSe
+                } else {
+                    egui::CursorIcon::ResizeNeSw
+                }
+            }
+            _ if direction.x.abs() > direction.y.abs() => egui::CursorIcon::ResizeHorizontal,
+            _ => egui::CursorIcon::ResizeVertical,
+        }
+    }
+
     pub(crate) fn contains(&self, visible: Rect, p: Pos2) -> bool {
         (visible.is_positive() && visible.contains(p)) || crate::edit_text_ui::quad_contains(self.corners(), p)
     }
@@ -184,14 +199,19 @@ impl ImageObb {
         let h_v = (c * c + d * d).sqrt().max(1e-6);
         let u_axis = (a / w_u, b / w_u);
         let v_axis = (c / h_v, d / h_v);
-        let is_rotated = b.abs() > 1e-4 || c.abs() > 1e-4;
+        // The fast rectangle path interprets labels in screen space. Use matrix
+        // resizing whenever the image's user-space axes are turned or reflected
+        // on screen, including page /Rotate and View > Rotate View.
+        let u = s10 - s00;
+        let v = s01 - s00;
+        let is_rotated = u.y.abs() > 1e-4 || v.x.abs() > 1e-4 || u.x < 0.0 || v.y > 0.0;
 
         Self { s00, s10, s11, s01, s_bc, s_rc, s_tc, s_lc, s_rot, screen_center, u_axis, v_axis, is_rotated }
     }
 
     pub fn from_image(im: &pdfcraft_engine::PageImage, xf: &PageXform, info: &DocInfo, page: usize) -> Self {
-        let [_, b, c, ..] = im.matrix;
-        let is_rot = b.abs() > 1e-4 || c.abs() > 1e-4;
+        let [a, b, c, d, ..] = im.matrix;
+        let is_rot = b.abs() > 1e-4 || c.abs() > 1e-4 || a < 0.0 || d < 0.0;
         let bounds = image_selectable_bounds(im);
         let matrix = if !is_rot && bounds[2] > bounds[0] && bounds[3] > bounds[1] {
             [bounds[2] - bounds[0], 0.0, 0.0, bounds[3] - bounds[1], bounds[0], bounds[1]]
@@ -2594,7 +2614,8 @@ fn draw_pages(
         if is_image_menu && let Some(sel) = view.image_selection.clone() {
             let images = cached_edit_images(view, doc, sel.page).to_vec();
             let at = view.comments.context_at.map(|(_, at)| at);
-            crate::edit_text_ui::image_context_menu(ui, view, &images, sel.page, sel.index, can_paste_image, &mut image_action, at);
+            let rotation = (view.rotation % 360 + info.pages.get(sel.page).map_or(0, |p| p.rotation % 360)) % 360;
+            crate::edit_text_ui::image_context_menu(ui, view, &images, sel.page, sel.index, can_paste_image, &mut image_action, at, rotation);
             return;
         }
         if view.comments.selected.is_some() {
@@ -3868,7 +3889,6 @@ fn apply_frame_requests(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui, 
         }
         Some(crate::edit_text_ui::ImageAction::CopyFile(page, index)) => app.copy_page_image_file(page, index),
         Some(crate::edit_text_ui::ImageAction::Cut(page, image)) => {
-            app.views[index].image_selection = None;
             app.cut_page_image(page, image);
         }
         Some(crate::edit_text_ui::ImageAction::Paste(page, at)) => {
