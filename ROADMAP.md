@@ -1,5 +1,7 @@
 # PdfCraft roadmap
 
+> **Last reviewed:** 2026-11-01 | **Last updated:** 2026-11-01 | **Change:** patch (M7, PR #2155 latest comments: explicit image-paste events, mixed-size field refresh, and documented mixed-script normalization with Undo; estimates unchanged)
+
 > **Last reviewed:** 2026-11-01 | **Last updated:** 2026-11-01 | **Change:** patch (M7, PR #2155 review follow-up: preserve image crop/tag/stream ownership, resize in page orientation, harden clipboard and text formatting, and reload installed fonts; estimates unchanged)
 
 > **Last reviewed:** 2026-10-31 | **Last updated:** 2026-10-31 | **Change:** patch (M2, PR #4172: GBK rasters compared with explicit Unicode and independently selected installed faces; wrong-glyph and wrong-family negative controls fail; estimates unchanged)
@@ -214,6 +216,8 @@ Ranked; detail and the full milestone table in [docs/roadmap.md](docs/roadmap.md
 | 8 | 1.0 polish: performance, right-to-left, missing languages, keyboard-only (M14) | 55–95 |
 
 ## Progress log
+
+- 2026-11-01: PR #2155 latest follow-up handles explicit image-paste events without release-time guesses, refreshes the font-size field when a selection becomes mixed, and specifies mixed-script normalization with exact Undo restoration. Candidate only; estimates unchanged.
 
 - 2026-11-01: PR #2155 review follow-up preserves editor crops through group moves and keeps arranged artwork outside added-item streams; unsafe nested-tag extraction is refused. Image handles and flips follow page orientation, added images accept general transforms, and clipboard/text/Home/font-discovery edge cases have focused regressions. Candidate only; estimates unchanged.
 - 2026-11-01: PR #2155 maintainer edits remove redundant image/text helpers and add regressions for crop ownership, arrange scope/state fidelity, clipboard precedence, crop-drag bounds, and font scanning. Transform and Unicode-script tools complete the headless paths.
