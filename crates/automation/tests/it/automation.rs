@@ -10304,3 +10304,41 @@ fn simple_rule_scan_drawn(content: &[u8]) -> Vec<u8> {
     }
     write_full(&doc, &SaveOptions::default()).unwrap()
 }
+
+#[test]
+fn editor_crop_group_move_and_arrange_survive_added_item_deletion_through_tools() {
+    let dir = workdir("editor-crop-group-arrange");
+    let mut a = auto(&dir);
+    let source = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_images", json!({"doc":source,"folder":"src","dpi":18,"pages":[1]}));
+    let doc = ok(&mut a, "doc_create", json!({"from":"images","paths":["src/a_page_1.png"]}))["doc"].as_u64().unwrap();
+    ok(&mut a, "image_edit", json!({"doc":doc,"page":1,"image":1,"action":"move","rect":[5,5,25,35]}));
+    ok(&mut a, "image_edit", json!({"doc":doc,"page":1,"image":1,"action":"crop","rect":[10,10,20,30]}));
+    ok(&mut a, "page_add_text", json!({"doc":doc,"page":1,"text":"Movable label","rect":[2,40,45,55],"size":6}));
+    let inventory = ok(&mut a, "object_list", json!({"doc":doc,"page":1}));
+    let objects: Vec<_> = inventory["objects"].as_array().unwrap().iter().map(|o| json!({"kind":o["kind"],"index":o["index"]})).collect();
+    assert_eq!(objects.len(), 2);
+    let moved = ok(&mut a, "object_move", json!({"doc":doc,"page":1,"objects":objects,"offset":[3,4]}));
+    assert_eq!(moved["moved"], 2);
+    let picture = ok(&mut a, "page_images", json!({"doc":doc,"page":1}))["images"][0].clone();
+    assert_eq!(picture["rect"], json!([8.0, 9.0, 28.0, 39.0]));
+    assert_eq!(picture["visible_rect"], json!([13.0, 14.0, 23.0, 34.0]));
+    assert!(page_text(&mut a, doc)[0].contains("Movable label"));
+    ok(&mut a, "edit_undo", json!({"doc":doc}));
+    assert_eq!(ok(&mut a, "page_images", json!({"doc":doc,"page":1}))["images"][0]["visible_rect"], json!([10.0, 10.0, 20.0, 30.0]));
+    ok(&mut a, "edit_redo", json!({"doc":doc}));
+    ok(&mut a, "doc_save", json!({"doc":doc,"path":"grouped.pdf"}));
+    let reopened = ok(&mut a, "doc_open", json!({"path":"grouped.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "page_images", json!({"doc":reopened,"page":1}))["images"][0]["visible_rect"], picture["visible_rect"]);
+    ok(&mut a, "image_edit", json!({"doc":reopened,"page":1,"image":1,"action":"bring_to_front"}));
+    assert_eq!(ok(&mut a, "content_list", json!({"doc":reopened}))["count"], 1);
+    ok(&mut a, "content_delete", json!({"doc":reopened,"page":1,"index":1}));
+    ok(&mut a, "doc_save", json!({"doc":reopened,"path":"independent.pdf"}));
+    let saved = ok(&mut a, "doc_open", json!({"path":"independent.pdf"}))["doc"].as_u64().unwrap();
+    let after = ok(&mut a, "page_images", json!({"doc":saved,"page":1}));
+    assert_eq!(after["count"], 1);
+    assert_eq!(after["images"][0]["rect"], picture["rect"]);
+    assert_eq!(after["images"][0]["visible_rect"], picture["visible_rect"]);
+    let rendered = a.call("page_render", &json!({"doc":saved,"page":1,"dpi":72})).unwrap();
+    assert!(rendered.iter().any(|c| matches!(c, Content::Png {data,width,height} if !data.is_empty() && *width > 0 && *height > 0)));
+}

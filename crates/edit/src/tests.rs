@@ -10066,3 +10066,106 @@ fn arrange_restores_initial_rendering_intent_from_ri_and_gs() {
         );
     }
 }
+
+#[test]
+fn editor_crop_moves_with_repeated_group_translation() {
+    let mut doc = image_page();
+    let caption_rect = text::text_lines(&doc, 0).unwrap()[0].rect;
+    crop(&mut doc, 0, 0, [150.0, 120.0, 250.0, 170.0]).unwrap();
+    let start = images::page_images(&doc, 0).unwrap()[0].clone();
+    let mut count = 0;
+    for iteration in 0..20 {
+        images::translate_images(&mut doc, 0, &[0], [1.0, -2.0]).unwrap();
+        let ops = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops;
+        if iteration == 0 {
+            count = ops.len();
+        }
+        assert_eq!(ops.len(), count, "repeated moves fold the same transform");
+    }
+    let shifted = |r: [f64; 4]| [r[0] + 20.0, r[1] - 40.0, r[2] + 20.0, r[3] - 40.0];
+    let doc = reopen(&doc);
+    let after = &images::page_images(&doc, 0).unwrap()[0];
+    assert!(close(after.rect, shifted(start.rect)));
+    assert!(
+        close(after.visible_rect.unwrap(), shifted(start.visible_rect.unwrap())),
+        "the editor crop moves with its pixels: {:?}",
+        after.visible_rect
+    );
+    assert_eq!(text::text_lines(&doc, 0).unwrap()[0].text, "Caption");
+    assert_eq!(text::text_lines(&doc, 0).unwrap()[0].rect, caption_rect);
+}
+
+#[test]
+fn arranging_original_image_keeps_it_independent_of_added_items() {
+    for update in [false, true] {
+        let mut doc = image_page();
+        let caption_rect = text::text_lines(&doc, 0).unwrap()[0].rect;
+        add_content(
+            &mut doc,
+            0,
+            &Content::Text(AddedText { rect: [20.0, 250.0, 250.0, 290.0], text: "Added caption".into(), ..AddedText::default() }),
+        )
+        .unwrap();
+        arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+        let mut doc = reopen(&doc);
+        assert_eq!(list_added(&doc).len(), 1, "the added item stays editable");
+        if update {
+            update_content(
+                &mut doc,
+                0,
+                0,
+                &Content::Text(AddedText { rect: [20.0, 250.0, 250.0, 290.0], text: "Updated caption".into(), ..AddedText::default() }),
+            )
+            .unwrap();
+        } else {
+            delete_content(&mut doc, 0, 0).unwrap();
+        }
+        let doc = reopen(&doc);
+        assert_eq!(images::page_images(&doc, 0).unwrap().len(), 1, "editing/deleting an added item must preserve arranged original artwork");
+        assert_eq!(images::page_images(&doc, 0).unwrap()[0].rect, [100.0, 100.0, 300.0, 200.0]);
+        let text = text::text_lines(&doc, 0).unwrap().into_iter().map(|line| line.text).collect::<Vec<_>>();
+        assert!(text.iter().any(|line| line == "Caption"), "the original caption survives");
+        assert_eq!(text.iter().any(|line| line == "Updated caption"), update);
+        assert_eq!(text::text_lines(&doc, 0).unwrap().iter().find(|line| line.text == "Caption").unwrap().rect, caption_rect);
+    }
+}
+
+#[test]
+fn arranging_nested_marked_image_refuses_without_losing_tags() {
+    for marked in ["/Figure <</MCID 3>> BDC", "/Figure BMC"] {
+        let mut doc = image_page_with(&format!(
+            "q {marked} 100 0 0 100 50 50 cm /Im0 Do EMC BT /F1 12 Tf 20 700 Td (Text) Tj ET Q BT /F1 12 Tf 20 720 Td (Outside) Tj ET"
+        ));
+        let before = page_content_bytes(&doc, 0);
+        let error = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap_err();
+        assert!(error.to_string().contains("marked-content"), "{error}");
+        assert_eq!(page_content_bytes(&doc, 0), before);
+        assert_eq!(page_content_bytes(&reopen(&doc), 0), before);
+    }
+}
+
+#[test]
+fn editor_crop_group_move_keeps_an_outer_author_clip_fixed() {
+    let mut doc = image_page_with("0 0 220 300 re W n q 200 0 0 100 100 100 cm /Im0 Do Q BT /F1 12 Tf 10 250 Td (Caption) Tj ET");
+    crop(&mut doc, 0, 0, [150.0, 120.0, 210.0, 170.0]).unwrap();
+    let mut operators = 0;
+    for i in 0..20 {
+        images::translate_images(&mut doc, 0, &[0], [1.0, -2.0]).unwrap();
+        let count = pdfcraft_content::parse(&page_content_bytes(&doc, 0)).ops.len();
+        if i == 0 {
+            operators = count;
+        }
+        assert_eq!(count, operators, "moves under an inherited clip must fold their transform");
+    }
+    let doc = reopen(&doc);
+    let image = &images::page_images(&doc, 0).unwrap()[0];
+    assert!(close(image.rect, [120.0, 60.0, 320.0, 160.0]));
+    assert!(
+        close(image.visible_rect.unwrap(), [170.0, 80.0, 220.0, 130.0]),
+        "the editor crop moves but its author's outer clip stays fixed: {:?}",
+        image.visible_rect
+    );
+    let bytes = page_content_bytes(&doc, 0);
+    assert!(String::from_utf8_lossy(&bytes).starts_with("0 0 220 300 re W n"));
+    assert_eq!(text::text_lines(&doc, 0).unwrap()[0].text, "Caption");
+}

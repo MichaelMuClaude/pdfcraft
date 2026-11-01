@@ -1221,6 +1221,18 @@ fn arrange_image(
     // a new structure element and MCID, so we refuse to rearrange it to avoid leaving the image untagged.
     // If the sequence holds only this image, the whole marked unit is moved intact.
     let marked_unit = ops.get(target_unit.start).is_some_and(|o| o.is("BDC") || o.is("BMC"));
+    let marked_depth = ops.iter().take(target).fold(0usize, |depth, op| {
+        if op.is("BDC") || op.is("BMC") {
+            depth.saturating_add(1)
+        } else if op.is("EMC") {
+            depth.saturating_sub(1)
+        } else {
+            depth
+        }
+    });
+    if marked_depth > usize::from(marked_unit) {
+        return Err(EditError::Invalid("cannot rearrange an image out of a nested marked-content sequence".into()));
+    }
     if marked_unit && has_other_paint {
         return Err(EditError::Invalid("cannot rearrange an image that shares a marked-content sequence with other content".into()));
     }
@@ -1233,6 +1245,25 @@ fn arrange_image(
     } else {
         (ops.get(dest_unit.start).ok_or_else(missing)?.span.start, dest_unit.start)
     };
+
+    // An added item owns its entire stream: editing or deleting it replaces that stream.
+    // Insert ordinary artwork next to the complete owned unit in a separate stream instead.
+    let destination_piece = if insert_after {
+        dest_unit.end.checked_sub(1).and_then(|i| ops.get(i)).map(|op| pieces.piece_of(op.span.end.saturating_sub(1)))
+    } else {
+        ops.get(dest_unit.start).map(|op| pieces.piece_of(op.span.start))
+    };
+    let owned_destination = destination_piece
+        .filter(|piece| all.get(*piece).is_some_and(|(obj, _)| doc.resolve(obj).as_dict().is_some_and(|d| d.get(b"PCAdded").is_some())));
+    if let Some(piece) = owned_destination {
+        let whole_unit = ops.iter().enumerate().all(|(index, op)| {
+            let (first, last) = pieces.pieces_of(op);
+            if dest_unit.contains(&index) { first == piece && last == piece } else { piece < first || piece > last }
+        });
+        if !whole_unit || img.stream == piece {
+            return Err(EditError::Invalid("cannot arrange an image inside an added item's content stream".into()));
+        }
+    }
 
     let (leaking_ops, has_leaking_clip) = scan_leaking_ops(&ops, rem_start, rem_end);
 
@@ -1389,6 +1420,23 @@ fn arrange_image(
     } else {
         Vec::new()
     };
+
+    if let Some(piece) = owned_destination {
+        let changed = pieces.splice([(target_span, removal_replacement)]);
+        let contents = crate::text::rewritten_contents(doc, all, changed);
+        let mut list = match contents {
+            Object::Array(list) => list,
+            one => vec![one],
+        };
+        let insertion = piece.saturating_add(usize::from(insert_after));
+        if insertion > list.len() {
+            return Err(EditError::Invalid("the destination content stream is missing".into()));
+        }
+        let relocated = doc.add(Object::Stream(pdfcraft_cos::Stream::flate(Dict::new(), &serialized)));
+        list.insert(insertion, Object::Ref(relocated));
+        doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), Object::Array(list)))?;
+        return Ok(());
+    }
 
     let mut edits = Vec::new();
     if dest_pos >= target_span.end {
@@ -1813,6 +1861,38 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
     }
     // Images alone in their own `q re W n cm Do Q` take the clip with them.
     let mut clips = std::collections::BTreeMap::new();
+    let mut crop_starts = std::collections::BTreeMap::new();
+    let mut crop_ends = std::collections::BTreeSet::new();
+    let mut folds = std::collections::BTreeMap::new();
+    for image in images.iter().filter(|image| image.has_editor_crop()) {
+        let Some(&(_, _, offset)) = plans.get(&image.op) else { continue };
+        let Some((start, end, placement)) = image_scopes(&ops, image.op, "moved")?.transform_scope(image.op) else {
+            return Err(EditError::Invalid("the image crop cannot be moved independently".into()));
+        };
+        let inverse = placement.invert().ok_or_else(|| EditError::Invalid("a selected image has no area".into()))?;
+        let local = placement.then(&Matrix::translate(offset[0], offset[1])).then(&inverse);
+        if !local.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
+            return Err(EditError::Invalid("the image move is too large".into()));
+        }
+        let leading_transform = || {
+            let at = start.checked_add(1)?;
+            if start >= end || !ops.get(start)?.is("q") || !ops.get(at)?.is("cm") {
+                return None;
+            }
+            ops.get(at)?.nums::<6>().map(|m| (at, Matrix(m)))
+        };
+        if let Some((at, cm)) = enclosing_transform(&ops, start, end).or_else(leading_transform) {
+            let folded = local.then(&cm);
+            if !folded.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
+                return Err(EditError::Invalid("the image move is too large".into()));
+            }
+            folds.insert(at, folded);
+        } else {
+            crop_starts.insert(start, local);
+            crop_ends.insert(end);
+        }
+        plans.remove(&image.op);
+    }
     for index in 0..ops.len() {
         let Some(&(_, placement, offset)) = plans.get(&index) else { continue };
         let Some((at, cm)) = exclusive_clip(&ops, index) else { continue };
@@ -1833,7 +1913,6 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
         };
     }
     // An image already alone in `q cm Do Q` moves by changing that `cm`, not by nesting another.
-    let mut folds = std::collections::BTreeMap::new();
     for index in 0..ops.len() {
         let Some(&(movement, _, _)) = plans.get(&index) else { continue };
         let Some((at, cm)) = enclosing_transform(&ops, index, index) else { continue };
@@ -1848,6 +1927,14 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
         return Err(EditError::Invalid("a selected image operation is missing".into()));
     }
     let data = crate::text::splice(&pieces, &ops, |index| {
+        if let Some(matrix) = crop_starts.remove(&index) {
+            return (vec![Op::new("q", vec![]), Op::new("cm", matrix.0.map(Object::Real).to_vec())], true);
+        }
+        if crop_ends.remove(&index) {
+            let mut out: Vec<_> = ops.get(index).cloned().into_iter().collect();
+            out.push(Op::new("Q", vec![]));
+            return (out, false);
+        }
         if let Some((c, keep)) = clips.remove(&index) {
             return (vec![Op::new("cm", c.0.map(Object::Real).to_vec())], keep);
         }
