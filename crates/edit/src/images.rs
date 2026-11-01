@@ -644,6 +644,10 @@ pub(crate) struct EffectiveGState {
     pub(crate) ca_stroke: Option<f64>,
     pub(crate) bm: Option<Vec<u8>>,
     pub(crate) smask: Option<MaskIdentity>,
+    // Printing parameters cannot generally be reset by a content-stream operator. Retain their
+    // exact values so Arrange refuses a destination whose state it cannot reconstruct.
+    print_params: std::collections::BTreeMap<Vec<u8>, Object>,
+    rendering_intent: Option<Vec<u8>>,
 }
 
 impl EffectiveGState {
@@ -652,11 +656,20 @@ impl EffectiveGState {
             || (self.ca_stroke.unwrap_or(1.0) - other.ca_stroke.unwrap_or(1.0)).abs() > 1e-4
             || self.bm.as_deref().unwrap_or(b"Normal") != other.bm.as_deref().unwrap_or(b"Normal")
             || self.smask != other.smask
+            || self.print_params != other.print_params
     }
 
     /// Merge the `gs_name` ExtGState `dict`. An inline soft mask with no group of its own is
     /// known by the name of the ExtGState that sets it.
     pub(crate) fn merge_dict(&mut self, dict: &Dict, doc: &Document, gs_name: &[u8]) {
+        for key in [b"TR".as_slice(), b"TR2", b"OP", b"op", b"OPM", b"BG", b"BG2", b"UCR", b"UCR2", b"HT"] {
+            if let Some(value) = dict.get(key) {
+                self.print_params.insert(key.to_vec(), value.clone());
+            }
+        }
+        if let Some(intent) = dict.get(b"RI").map(|v| doc.resolve(v)).and_then(|v| v.as_name().map(<[u8]>::to_vec)) {
+            self.rendering_intent = Some(intent);
+        }
         if let Some(val) = dict.get(b"ca").map(|v| doc.resolve(v)).and_then(|v| v.as_f64()) {
             self.ca = Some(val);
         }
@@ -712,6 +725,7 @@ struct ExtendedGStateTracker {
 impl ExtendedGStateTracker {
     fn step(&mut self, op: &Op, ext_gstates: &Dict, doc: &Document, ctm: Matrix) -> Result<(), EditError> {
         match op.op.as_slice() {
+            b"ri" => self.current_state.rendering_intent = op.name(0).map(<[u8]>::to_vec),
             b"q" => {
                 if self.stack.len() >= 4096 {
                     return Err(EditError::Invalid("the image graphics state is too deeply nested".into()));
@@ -758,10 +772,10 @@ struct DrawingState {
     params: [Option<Op>; 7],
 }
 
-/// `sc`/`scn` (or `SC`/`SCN`) after the colour space operator `space` keep that space.
+/// Keep the explicit or implicit colour-space selector before `sc`/`scn` (or `SC`/`SCN`).
 fn set_color(slot: &mut Option<Vec<Op>>, op: &Op, space: &str) {
     match slot {
-        Some(ops) if ops.first().is_some_and(|o| o.is(space)) => {
+        Some(ops) if ops.first().is_some_and(|o| o.is(space) || matches!(o.op.as_slice(), b"g" | b"rg" | b"k" | b"G" | b"RG" | b"K")) => {
             ops.truncate(1);
             ops.push(op.clone());
         }
@@ -803,8 +817,7 @@ impl DrawingStateTracker {
     }
 }
 
-/// The value a line-style parameter has when a page starts (ISO 32000-2 Table 51). The rendering
-/// intent and flatness have none to restore here.
+/// Initial line-style parameters and rendering intent (ISO 32000-2 Table 51).
 fn initial_param(name: &str) -> Option<Op> {
     use pdfcraft_content::num;
     let operands = match name {
@@ -812,6 +825,7 @@ fn initial_param(name: &str) -> Option<Op> {
         "J" | "j" => vec![num(0.0)],
         "M" => vec![num(10.0)],
         "d" => vec![Object::Array(vec![]), num(0.0)],
+        "ri" => vec![Object::name("RelativeColorimetric")],
         _ => return None,
     };
     Some(Op::new(name, operands))
@@ -823,8 +837,8 @@ fn compute_inherited_drawing_ops(source: &DrawingState, dest: &DrawingState, ext
     let sets = |names: &[&str]| extracted_state_ops.iter().any(|o| names.iter().any(|n| o.is(n)));
     let mut ops = Vec::new();
     for (own, source, dest, black) in [
-        (sets(&["g", "rg", "k", "sc", "scn"]), &source.non_stroking_color, &dest.non_stroking_color, "g"),
-        (sets(&["G", "RG", "K", "SC", "SCN"]), &source.stroking_color, &dest.stroking_color, "G"),
+        (sets(&["g", "rg", "k", "cs"]), &source.non_stroking_color, &dest.non_stroking_color, "g"),
+        (sets(&["G", "RG", "K", "CS"]), &source.stroking_color, &dest.stroking_color, "G"),
     ] {
         match (own, source, dest) {
             (true, _, _) | (false, None, None) => {}
@@ -1257,6 +1271,11 @@ fn arrange_image(
         state.apply(op)?;
         tracker.step(op, &ext_gstates, doc, state.placement.matrix)?;
         drawing_tracker.step(op)?;
+        if op.is("gs")
+            && let Some(intent) = &tracker.current_state.rendering_intent
+        {
+            drawing_tracker.step(&Op::new("ri", vec![Object::Name(intent.clone())]))?;
+        }
         if i == rem_end.saturating_sub(1) {
             ctm_after_removal = state.placement.matrix;
         }
@@ -1329,7 +1348,7 @@ fn arrange_image(
 
     if reconstructed_state.visually_differs(&source_effective_state) {
         return Err(EditError::Invalid(
-            "unsupported graphics state: moving the image would alter effective opacity, blend mode, or soft mask".into(),
+            "unsupported graphics state: moving the image would alter opacity, blend mode, soft mask, or printing parameters".into(),
         ));
     }
 

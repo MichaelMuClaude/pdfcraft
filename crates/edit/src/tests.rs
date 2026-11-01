@@ -9978,3 +9978,91 @@ fn remove_crop_refuses_an_unmarked_author_clip_without_changes() {
     assert!(remove_crop(&mut doc, 0, 0).is_err());
     assert_eq!(page_content_bytes(&doc, 0), before);
 }
+
+#[test]
+fn arrange_refuses_unrestorable_extended_print_state() {
+    let mut unexpectedly_moved = Vec::new();
+    for (key, value) in [
+        ("TR", Object::name("Identity")),
+        ("TR2", Object::name("Default")),
+        ("OP", Object::Bool(true)),
+        ("op", Object::Bool(true)),
+        ("OPM", Object::Int(1)),
+        ("BG", Object::name("Default")),
+        ("BG2", Object::name("Default")),
+        ("UCR", Object::name("Default")),
+        ("UCR2", Object::name("Default")),
+        ("HT", Object::name("Default")),
+    ] {
+        let mut doc = image_page_with("q 100 0 0 100 50 50 cm /Im0 Do Q /Print gs BT /F1 12 Tf 20 700 Td (Text) Tj ET");
+        let page = pdfcraft_model::pages(&doc)[0].clone();
+        let mut resources = doc.resolve(page.dict.get(b"Resources").unwrap()).as_dict().unwrap().clone();
+        resources.set(
+            b"ExtGState".to_vec(),
+            Object::Dict(Dict::from_iter([(b"Print".to_vec(), Object::Dict(Dict::from_iter([(key.as_bytes().to_vec(), value)])))])),
+        );
+        doc.update_dict(page.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(resources))).unwrap();
+        let before = page_content_bytes(&doc, 0);
+        match arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront) {
+            Ok(()) => unexpectedly_moved.push(key),
+            Err(error) => {
+                assert!(error.to_string().contains("graphics state"), "{key}: {error}");
+                assert_eq!(page_content_bytes(&doc, 0), before, "{key} refusal changes nothing");
+            }
+        }
+    }
+    assert!(unexpectedly_moved.is_empty(), "unrestorable destination state was accepted: {unexpectedly_moved:?}");
+}
+
+#[test]
+fn arrange_keeps_implicit_device_spaces_before_sc_and_scn() {
+    for (select, color) in [("0 g", "0.5 sc"), ("0 0 0 rg", "1 0 0 sc"), ("0 0 0 1 k", "0 1 1 0 scn")] {
+        for stroke in [false, true] {
+            let (select, color) = if stroke { (select.to_uppercase(), color.to_uppercase()) } else { (select.into(), color.into()) };
+            for content in [
+                format!("q {select} {color} q 100 0 0 100 50 50 cm /Im0 Do Q Q BT /F1 12 Tf 20 700 Td (Text) Tj ET"),
+                format!("q {select} q {color} 100 0 0 100 50 50 cm /Im0 Do Q Q BT /F1 12 Tf 20 700 Td (Text) Tj ET"),
+            ] {
+                let mut doc = stencil_page_with(&content);
+                arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+                let doc = reopen(&doc);
+                let bytes = page_content_bytes(&doc, 0);
+                let ops = pdfcraft_content::parse(&bytes).ops;
+                let do_index = ops.iter().rposition(|op| op.is("Do")).unwrap();
+                let start = ops[..do_index].iter().rposition(|op| op.is("q")).unwrap();
+                let relocated = &ops[start..do_index];
+                let selector = select.split_whitespace().last().unwrap();
+                let color_op = color.split_whitespace().last().unwrap();
+                let space_index = relocated.iter().position(|op| op.is(selector));
+                let color_index = relocated.iter().position(|op| op.is(color_op));
+                assert!(
+                    space_index.is_some() && space_index < color_index,
+                    "{select} must select its device space before {color}: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn arrange_restores_initial_rendering_intent_from_ri_and_gs() {
+    for selection in ["/Saturation ri", "/Print gs"] {
+        let mut doc = image_page_with(&format!("q 100 0 0 100 50 50 cm /Im0 Do Q {selection} BT /F1 12 Tf 20 700 Td (Text) Tj ET"));
+        let page = pdfcraft_model::pages(&doc)[0].clone();
+        let mut resources = doc.resolve(page.dict.get(b"Resources").unwrap()).as_dict().unwrap().clone();
+        resources.set(
+            b"ExtGState".to_vec(),
+            Object::Dict(Dict::from_iter([(b"Print".to_vec(), Object::Dict(Dict::from_iter([(b"RI".to_vec(), Object::name("Saturation"))])))])),
+        );
+        doc.update_dict(page.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(resources))).unwrap();
+        arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+        let doc = reopen(&doc);
+        let bytes = page_content_bytes(&doc, 0);
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("/RelativeColorimetric ri"),
+            "default rendering intent must be restored after {selection}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
