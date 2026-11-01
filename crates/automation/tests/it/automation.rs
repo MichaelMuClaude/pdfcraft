@@ -3538,7 +3538,14 @@ fn transforming_page_images_through_tools() {
 
     // Flat, non-finite, short and missing matrices are refused before anything changes.
     let before = rect(&mut a);
-    for bad in [json!([1, 2, 2, 4, 0, 0]), json!([0, 0, 0, 0, 0, 0]), json!([1e300, 0, 0, 1e300, 0, 0]), json!([1, 0, 0, 1])] {
+    for bad in [
+        json!([1, 2, 2, 4, 0, 0]),
+        json!([0, 0, 0, 0, 0, 0]),
+        json!([1e300, 0, 0, 1e300, 0, 0]),
+        json!([1, 0, 0, 1]),
+        json!([1, 0, "invalid", 0, 1, 10, 0]),
+        json!([1, 0, null, 0, 1, 10, 0]),
+    ] {
         let r = a.call("image_edit", &json!({ "doc": made, "page": 1, "image": 1, "action": "transform", "matrix": bad }));
         assert!(matches!(r, Err(ToolError::InvalidArgs(_))), "{bad}: {r:?}");
     }

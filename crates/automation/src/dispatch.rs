@@ -425,8 +425,11 @@ impl Automation {
                             ImageEdit::Move([u0[0].min(u1[0]) as f64, u0[1].min(u1[1]) as f64, u0[0].max(u1[0]) as f64, u0[1].max(u1[1]) as f64])
                         }
                         "transform" => {
-                            let m: Vec<f64> =
-                                a.get("matrix").and_then(Value::as_array).map(|x| x.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+                            let m: Vec<f64> = a
+                                .get("matrix")
+                                .and_then(Value::as_array)
+                                .and_then(|x| x.iter().map(Value::as_f64).collect())
+                                .ok_or_else(|| ToolError::InvalidArgs("transform needs matrix: 6 numbers [a, b, c, d, e, f]".into()))?;
                             let m = <[f64; 6]>::try_from(m)
                                 .map_err(|_| ToolError::InvalidArgs("transform needs matrix: 6 numbers [a, b, c, d, e, f]".into()))?;
                             ImageEdit::Transform(view_transform_to_user(&self.doc(&a)?.info.pages[page], m)?)
