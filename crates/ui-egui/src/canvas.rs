@@ -768,6 +768,7 @@ pub(crate) struct PageMenuPerms {
     pub can_annotate: bool,
     pub can_print: bool,
     pub can_copy: bool,
+    pub can_copy_items: bool,
     pub can_paste: bool,
     pub has_annotations: bool,
 }
@@ -796,7 +797,7 @@ pub(crate) fn default_page_context_menu(ui: &mut egui::Ui, page: usize, at: [f64
 
     pick(
         ui.add_enabled(
-            perms.can_copy,
+            perms.can_copy_items,
             egui::Button::new(tl!("Copy")).shortcut_text(crate::commands::shortcut_label(ui.ctx(), crate::commands::COPY)),
         ),
         ui,
@@ -1692,6 +1693,15 @@ fn page_tool_input(ui: &mut egui::Ui, view: &mut DocView, frame: &mut PageFrame<
         let image_used = crate::edit_text_ui::image_input(&image_cx, &images, view);
         !others_own_pointer && (text_used || image_used)
     };
+    if tool == QuickTool::EditText {
+        if others_own_pointer {
+            if ptr.pressed().is_some() || resp.clicked() || resp.secondary_clicked() {
+                view.image_selection = None;
+            }
+        } else {
+            crate::content_ui::sync_image_selection(view, i, &images, added);
+        }
+    }
     let on_link = tool == QuickTool::Link && can_modify && crate::link_ui::page_input(cx, doc_links, view);
     if tool == QuickTool::Select
         && resp.secondary_clicked()
@@ -2673,7 +2683,8 @@ fn draw_pages(
             can_assemble: doc.allows_assembly(),
             can_annotate: allowed,
             can_print: doc.allows_printing(),
-            can_copy: can_copy_items,
+            can_copy,
+            can_copy_items,
             can_paste,
             has_annotations: !info.annotations.is_empty(),
         };
@@ -3744,16 +3755,17 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     if preparing {
         crate::prepare::keys(ui.ctx(), view);
     }
+    if tool != QuickTool::EditText {
+        view.image_selection = None;
+        crate::content_ui::release_image_selection(view, &added);
+    }
     if editing_content {
-        crate::content_ui::keys(ui.ctx(), view);
+        crate::content_ui::keys(ui.ctx(), view, tool == QuickTool::EditText);
     }
     if tool == QuickTool::Link {
         crate::link_ui::keys(ui.ctx(), view);
     } else {
         view.links.selected = None;
-    }
-    if tool != QuickTool::EditText {
-        view.image_selection = None;
     }
     if stamp_placed {
         tool = QuickTool::Select;

@@ -57,6 +57,7 @@ mod open_action;
 mod organize_drag;
 mod pageboxes;
 mod panel_snapshots;
+mod paste_ownership;
 mod pdf_links;
 mod pickers;
 mod pinned_tools;

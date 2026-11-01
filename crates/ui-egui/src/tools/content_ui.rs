@@ -542,9 +542,52 @@ pub(crate) fn paint_page(
     }
 }
 
+/// The image controller owns image selection; the added-content panel follows the same XObject.
+pub(crate) fn sync_image_selection(view: &mut DocView, page: usize, images: &[pdfcraft_engine::PageImage], added: &[Added]) {
+    let Some(selection) = view.image_selection.as_ref().filter(|selection| selection.page == page) else { return };
+    if view.content.draft.is_some() {
+        return;
+    }
+    let object = images
+        .get(selection.index)
+        .and_then(|image| image.object)
+        .filter(|object| images.iter().filter(|image| image.object == Some(*object)).count() == 1);
+    view.content.selected = object.and_then(|object| {
+        let mut matches = added
+            .iter()
+            .filter(|item| item.page == page)
+            .enumerate()
+            .filter(|(_, item)| matches!(&item.content, AddedContent::Image(image) if image.image == object));
+        let selected = matches.next().map(|(index, _)| (page, index));
+        if matches.next().is_none() { selected } else { None }
+    });
+    view.content.select_added = None;
+    view.content.grab = None;
+}
+
+/// Leaving the image controller cannot leave a hidden added image owning keyboard actions.
+pub(crate) fn release_image_selection(view: &mut DocView, added: &[Added]) {
+    if view.content.draft.is_some() {
+        return;
+    }
+    let image_selected = view.content.selected.is_some_and(|(page, index)| {
+        added.iter().filter(|item| item.page == page).nth(index).is_some_and(|item| matches!(item.content, AddedContent::Image(_)))
+    });
+    if image_selected {
+        view.content.selected = None;
+        view.content.select_added = None;
+        view.content.grab = None;
+    }
+}
+
 /// Delete removes the selected item; Escape clears the selection.
-pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView) {
-    if view.content.selected.is_none() || view.content.draft.is_some() || ctx.egui_wants_keyboard_input() {
+pub(crate) fn keys(ctx: &egui::Context, view: &mut DocView, image_controller_active: bool) {
+    if image_controller_active && view.image_selection.is_some()
+        || matches!(view.pending_edit.as_ref(), Some(Edit::EditPageImage { .. }))
+        || view.content.selected.is_none()
+        || view.content.draft.is_some()
+        || ctx.egui_wants_keyboard_input()
+    {
         return;
     }
     let (del, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace), i.key_pressed(egui::Key::Escape)));
@@ -1180,35 +1223,34 @@ impl crate::PdfCraftApp {
                 self.session.get(id).and_then(|d| d.info.pages.get(page)).map(|p| (p.width as f64, p.height as f64)).unwrap_or((612.0, 792.0));
             let k = ((pw * 0.8) / raw_w.max(1.0)).min((ph * 0.8) / raw_h.max(1.0)).min(1.0);
             let (w, h) = (raw_w * k, raw_h * k);
-            Some([at[0] - w * 0.5, at[1] - h * 0.5, at[0] + w * 0.5, at[1] + h * 0.5])
+            let Some(info) = self.session.get(id).and_then(|doc| doc.info.pages.get(page)) else { return false };
+            let view = info.user_to_view(at[0] as f32, at[1] as f32).map(f64::from);
+            // Added content uses the page's bottom-left display origin; rendered view space is y-down.
+            let center = [view[0], f64::from(info.height) - view[1]];
+            Some([center[0] - w * 0.5, center[1] - h * 0.5, center[0] + w * 0.5, center[1] + h * 0.5])
         } else {
             None
         };
 
+        let added_before: std::collections::HashSet<_> =
+            self.session.get(id).into_iter().flat_map(|doc| doc.added()).filter(|item| item.page == page).map(|item| item.obj).collect();
         if self.apply_edit(pdfcraft_engine::Edit::AddImage { page, rect: target_rect, name, bytes: std::sync::Arc::new(bytes) }) {
-            let added_count = self.session.get(id).map_or(0, |d| d.added().iter().filter(|a| a.page == page).count());
-            let added_idx = added_count.saturating_sub(1);
-            let pasted_idx = self.session.get(id).map_or(0, |d| {
-                let images = d.page_images(page);
-                if let Some(target) = target_rect {
-                    images
-                        .iter()
-                        .rposition(|im| {
-                            (im.rect[0] - target[0]).abs() < 1e-2
-                                && (im.rect[1] - target[1]).abs() < 1e-2
-                                && (im.rect[2] - target[2]).abs() < 1e-2
-                                && (im.rect[3] - target[3]).abs() < 1e-2
-                        })
-                        .unwrap_or(images.len().saturating_sub(1))
-                } else {
-                    images.len().saturating_sub(1)
+            let selection = self.session.get(id).and_then(|doc| {
+                let mut inserted =
+                    doc.added().iter().filter(|item| item.page == page).enumerate().filter(|(_, item)| !added_before.contains(&item.obj));
+                let (added_idx, item) = inserted.next()?;
+                if inserted.next().is_some() {
+                    return None;
                 }
+                let AddedContent::Image(image) = &item.content else { return None };
+                let pasted_idx = doc.page_images(page).iter().rposition(|placed| placed.object == Some(image.image))?;
+                Some((added_idx, pasted_idx))
             });
             if let Some(v) = self.views.get_mut(i) {
                 v.current = page;
-                v.content.selected = Some((page, added_idx));
-                v.content.select_added = Some((page, added_idx));
-                v.image_selection = Some(crate::edit_text_ui::ImageSelection::at(page, pasted_idx));
+                v.content.selected = selection.map(|(added, _)| (page, added));
+                v.content.select_added = v.content.selected;
+                v.image_selection = selection.map(|(_, image)| crate::edit_text_ui::ImageSelection::at(page, image));
             }
             self.quick_tool = crate::QuickTool::EditText;
             self.notify_tr("Image pasted");
