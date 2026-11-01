@@ -25,6 +25,17 @@ impl PdfCraftApp {
     /// ⌘C / ⌘X / ⌘V copy, cut and paste text or images on canvas (unless a text field has focus).
     pub(super) fn clipboard_keys(&mut self, i: usize, ctx: &egui::Context, pasted: bool) {
         use egui::{Key, KeyboardShortcut, Modifiers};
+        let paste_event_text = ctx.input(|input| {
+            input.events.iter().find_map(|e| match e {
+                egui::Event::Paste(text) if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            })
+        });
+        if paste_event_text.is_some() {
+            // A text field may own the paste; the canvas cache must still observe the new contents.
+            self.last_copied_image = None;
+            self.last_copied_file = None;
+        }
         let free = self.dialog.is_none() && !self.palette_open && !ctx.egui_wants_keyboard_input() && !self.is_preparing();
         if !free || self.views.get(i).is_some_and(|v| v.forms.focus.is_some() || v.organize) {
             return;
@@ -33,12 +44,6 @@ impl PdfCraftApp {
             || ctx.input_mut(|input| input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::C)));
         let cut = ctx.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Cut)))
             || ctx.input_mut(|input| input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::X)));
-        let paste_event_text = ctx.input(|input| {
-            input.events.iter().find_map(|e| match e {
-                egui::Event::Paste(text) if !text.is_empty() => Some(text.clone()),
-                _ => None,
-            })
-        });
         let paste = pasted
             || ctx.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Paste(_))))
             || ctx.input_mut(|input| input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V)));
@@ -56,12 +61,14 @@ impl PdfCraftApp {
             && let Some(id) = self.views.get(i).map(|v| v.id)
             && self.may_copy(id)
         {
-            if let Some(v) = self.views.get_mut(i) {
-                v.image_selection = None;
-            }
             self.cut_page_image(sel.page, sel.index);
         }
         if paste {
+            // A release is only a fallback for image shortcuts whose press the platform swallowed.
+            // Text paste already reached its owner; an empty image clipboard needs no second notice.
+            if pasted && paste_event_text.is_none() && !self.can_paste_image() {
+                return;
+            }
             let has_override_image = matches!(self.clipboard_override, Some(crate::create_ui::Clip::Image { .. }));
             #[cfg(not(target_arch = "wasm32"))]
             let system_has_text = if !has_override_image && self.system_clipboard { crate::os_clipboard::has_text() } else { false };
@@ -124,5 +131,57 @@ impl PdfCraftApp {
             Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => self.document_copy = None,
         }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn review_an_image_less_release_is_silent_but_explicit_paste_explains() {
+        let mut app = PdfCraftApp::new();
+        app.system_clipboard = false;
+        app.create_blank();
+        app.toast = None;
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput::default(), |ui| app.clipboard_keys(0, ui.ctx(), true)).drop_without_applying_deltas();
+        assert!(app.toast.is_none());
+        assert!(!app.paste_image(0, None));
+        assert!(app.toast.is_some(), "an explicit menu action still explains why there is no image");
+    }
+
+    #[test]
+    fn review_text_paste_release_is_silent_and_later_image_paste_still_works() {
+        let mut app = PdfCraftApp::new();
+        app.system_clipboard = false;
+        app.create_blank();
+        app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
+        app.palette_open = true; // A text field owns the first event.
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput { events: vec![egui::Event::Paste("text".into())], ..Default::default() }, |ui| {
+            app.clipboard_keys(0, ui.ctx(), false)
+        })
+        .drop_without_applying_deltas();
+        assert!(app.last_copied_image.is_none());
+        app.palette_open = false;
+        app.toast = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| app.clipboard_keys(0, ui.ctx(), true)).drop_without_applying_deltas();
+        assert!(app.toast.is_none(), "the text gesture's key release must be silent");
+        app.clipboard_override = Some(crate::create_ui::Clip::Image { width: 1, height: 1, rgba: vec![0, 255, 0, 255] });
+        ctx.run_ui(egui::RawInput::default(), |ui| app.clipboard_keys(0, ui.ctx(), true)).drop_without_applying_deltas();
+        let id = app.active_ids().unwrap().1;
+        assert_eq!(app.session.get(id).unwrap().page_images(0).len(), 1, "a later real image shortcut still works");
+    }
+
+    #[test]
+    fn review_failed_keyboard_cut_keeps_the_image_selection() {
+        let mut app = PdfCraftApp::new();
+        app.system_clipboard = false;
+        app.create_blank();
+        app.views[0].image_selection = Some(crate::edit_text_ui::ImageSelection::at(0, 0));
+        let ctx = egui::Context::default();
+        ctx.run_ui(egui::RawInput { events: vec![egui::Event::Cut], ..Default::default() }, |ui| app.clipboard_keys(0, ui.ctx(), false))
+            .drop_without_applying_deltas();
+        assert!(app.views[0].image_selection.is_some());
     }
 }

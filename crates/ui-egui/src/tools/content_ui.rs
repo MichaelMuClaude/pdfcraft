@@ -946,10 +946,19 @@ impl crate::PdfCraftApp {
     }
 
     /// Cut: copy the picture, and only when that worked take it off the page (one undo step).
-    pub(crate) fn cut_page_image(&mut self, page: usize, index: usize) {
-        if self.copy_page_image(page, index) {
-            self.apply_edit(Edit::EditPageImage { page, index, change: pdfcraft_engine::ImageEdit::Delete });
+    pub(crate) fn cut_page_image(&mut self, page: usize, index: usize) -> bool {
+        let Some((view, id)) = self.active_ids() else { return false };
+        if self.session.get(id).is_some_and(|doc| !doc.allows_modification()) {
+            self.notify_error(tl!("The document's security settings don't allow this change"));
+            return false;
         }
+        if !self.copy_page_image(page, index) || !self.apply_edit(Edit::EditPageImage { page, index, change: pdfcraft_engine::ImageEdit::Delete }) {
+            return false;
+        }
+        if let Some(view) = self.views.get_mut(view) {
+            view.image_selection = None;
+        }
+        true
     }
 
     /// Redact image: a redaction mark over the whole picture. It is applied, like any mark, from
@@ -1027,13 +1036,12 @@ impl crate::PdfCraftApp {
     pub(crate) fn paste_key_released(&mut self, ctx: &egui::Context) -> bool {
         let mut released = false;
         ctx.input(|inp| {
-            if inp.modifiers.command {
-                self.last_command_time = Some(inp.time);
-            }
             for e in &inp.events {
                 if let egui::Event::Key { key: egui::Key::V, pressed, modifiers, .. } = e {
                     if modifiers.command {
                         self.last_command_time = Some(inp.time);
+                    } else if *pressed {
+                        self.last_command_time = None;
                     }
                     let command_recent = self.last_command_time.is_some_and(|t| inp.time >= t && inp.time - t < 0.35);
                     let command_active = modifiers.command || command_recent;
@@ -1058,11 +1066,7 @@ impl crate::PdfCraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             if self.system_clipboard {
-                match crate::os_clipboard::for_image_paste() {
-                    Some(crate::create_ui::Clip::Image { .. }) => return true,
-                    Some(crate::create_ui::Clip::Text(_)) => return false,
-                    None => {}
-                }
+                return matches!(crate::os_clipboard::for_image_paste(), Some(crate::create_ui::Clip::Image { .. }));
             }
         }
         self.last_copied_image.is_some() || self.last_copied_file.is_some()
@@ -1083,10 +1087,17 @@ impl crate::PdfCraftApp {
         let system = if self.clipboard_override.is_none() && self.system_clipboard { crate::os_clipboard::for_image_paste() } else { None };
         #[cfg(target_arch = "wasm32")]
         let system = None;
-        self.paste_image_with_system(page, rect, at, system)
+        self.paste_image_with_system(page, rect, at, system, cfg!(not(target_arch = "wasm32")) && self.system_clipboard)
     }
 
-    fn paste_image_with_system(&mut self, page: usize, rect: Option<[f64; 4]>, at: Option<[f64; 2]>, system: Option<crate::create_ui::Clip>) -> bool {
+    fn paste_image_with_system(
+        &mut self,
+        page: usize,
+        rect: Option<[f64; 4]>,
+        at: Option<[f64; 2]>,
+        system: Option<crate::create_ui::Clip>,
+        system_authoritative: bool,
+    ) -> bool {
         let Some((i, id)) = self.active_ids() else {
             return false;
         };
@@ -1111,7 +1122,7 @@ impl crate::PdfCraftApp {
             }
             Some(crate::create_ui::Clip::Text(_)) => None,
             None => {
-                if matches!(system, Some(crate::create_ui::Clip::Text(_))) {
+                if matches!(system, Some(crate::create_ui::Clip::Text(_))) || (system_authoritative && system.is_none()) {
                     self.last_copied_image = None;
                     self.last_copied_file = None;
                     self.notify_tr("No image on clipboard to paste");
@@ -1297,6 +1308,82 @@ mod tests {
 
     use super::*;
 
+    fn review_v_release(app: &mut crate::PdfCraftApp, ctx: &egui::Context, time: f64, events: Vec<egui::Event>) -> bool {
+        let mut paste = false;
+        ctx.run_ui(egui::RawInput { time: Some(time), events, ..Default::default() }, |ui| {
+            paste = app.paste_key_released(ui.ctx());
+        })
+        .drop_without_applying_deltas();
+        paste
+    }
+
+    fn review_key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn review_plain_v_after_another_shortcut_does_not_paste() {
+        let mut app = crate::PdfCraftApp::new();
+        let ctx = egui::Context::default();
+        review_v_release(
+            &mut app,
+            &ctx,
+            1.0,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::COMMAND), review_key(egui::Key::C, true, egui::Modifiers::COMMAND)],
+        );
+        assert!(!review_v_release(
+            &mut app,
+            &ctx,
+            1.1,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE), review_key(egui::Key::V, false, egui::Modifiers::NONE)]
+        ));
+    }
+
+    #[test]
+    fn review_web_can_paste_an_internal_image_without_a_native_clipboard() {
+        let mut app = crate::PdfCraftApp::new();
+        app.create_blank();
+        app.system_clipboard = true;
+        app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
+        assert!(app.paste_image_with_system(0, None, None, None, false));
+        let id = app.active_ids().unwrap().1;
+        assert_eq!(app.session.get(id).unwrap().page_images(0).len(), 1);
+    }
+
+    #[test]
+    fn review_system_without_supported_formats_does_not_paste_a_cached_image() {
+        let mut app = crate::PdfCraftApp::new();
+        app.create_blank();
+        app.system_clipboard = true;
+        app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
+        assert!(!app.paste_image_with_system(0, None, None, None, true));
+    }
+
+    #[test]
+    fn review_cut_checks_modify_permission_before_writing_the_clipboard() {
+        let mut app = crate::PdfCraftApp::new();
+        app.system_clipboard = false;
+        app.create_blank();
+        let png = crate::create_ui::png_from_rgba(1, 1, &[255, 0, 0, 255]).unwrap();
+        app.add_image("test.png".into(), png);
+        app.apply_edit(Edit::Protect(pdfcraft_engine::Protection {
+            permissions_password: Some("owner".into()),
+            changes: pdfcraft_engine::Changes::None,
+            copy: true,
+            ..Default::default()
+        }));
+        let id = app.active_ids().unwrap().1;
+        let bytes = app.session.save_bytes(id).unwrap();
+        let mut locked = crate::PdfCraftApp::new();
+        locked.system_clipboard = false;
+        locked.open_bytes("locked.pdf", None, bytes.as_ref().clone()).unwrap();
+        assert!(!locked.session.get(locked.active_ids().unwrap().1).unwrap().allows_modification());
+        locked.last_copied_image = Some((1, 1, vec![0, 255, 0, 255]));
+        let before = locked.last_copied_image.clone();
+        assert!(!locked.cut_page_image(0, 0));
+        assert_eq!(locked.last_copied_image, before);
+    }
+
     #[test]
     fn system_text_prevents_context_menu_paste_of_a_cached_image() {
         let mut app = crate::PdfCraftApp::new();
@@ -1305,7 +1392,7 @@ mod tests {
         let id = app.active_ids().unwrap().1;
         app.last_copied_image = Some((1, 1, vec![255, 0, 0, 255]));
         let undo = app.session.get(id).unwrap().can_undo().map(str::to_owned);
-        assert!(!app.paste_image_with_system(0, None, Some([20.0, 20.0]), Some(crate::create_ui::Clip::Text("new text".into()))));
+        assert!(!app.paste_image_with_system(0, None, Some([20.0, 20.0]), Some(crate::create_ui::Clip::Text("new text".into())), true));
         assert_eq!(app.session.get(id).unwrap().can_undo().map(str::to_owned), undo);
         assert!(app.session.get(id).unwrap().page_images(0).is_empty());
         assert!(app.last_copied_image.is_none());
