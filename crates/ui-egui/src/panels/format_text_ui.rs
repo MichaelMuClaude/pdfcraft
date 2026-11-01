@@ -471,8 +471,13 @@ fn font_size_input(ui: &mut egui::Ui, size: &mut f64, mixed: bool) -> bool {
         if previous != size.to_bits() || previous_mixed != mixed {
             text = initial_text();
         }
-        let field = egui::TextEdit::singleline(&mut text).id(id).desired_width(40.0);
-        let response = ui.add_sized([40.0, ui.spacing().interact_size.y], field).accessible_name(tl!("Font size:"));
+        // Reserve the localized mixed label, field margins and caret without resizing while typing.
+        let font = egui::TextStyle::Body.resolve(ui.style());
+        let margin = egui::Margin::from(ui.spacing().button_padding);
+        let mixed_width = ui.painter().layout_no_wrap(tl!("Mixed").into(), font.clone(), ui.visuals().text_color()).size().x;
+        let width = (mixed_width + margin.sum().x + 2.0).ceil().max(40.0);
+        let field = egui::TextEdit::singleline(&mut text).id(id).font(font).margin(margin).desired_width(width);
+        let response = ui.add_sized([width, ui.spacing().interact_size.y], field).accessible_name(tl!("Font size:"));
         let cancel = (response.has_focus() || response.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape));
         if cancel {
             text = initial_text();
@@ -538,6 +543,37 @@ mod typed_size_tests {
         }
         for value in ["", "0", "-1", "0.5", "501", "NaN", "inf", "1e999", "small"] {
             assert_eq!(typed_font_size(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn mixed_size_label_fits_the_themed_panel() {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let mut ready = false;
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(272.0, 500.0)).with_accessibility_check(false).build_ui_state(
+            move |ui, look: &mut AddedText| {
+                if !ready {
+                    egui_extras::install_image_loaders(ui.ctx());
+                    crate::theme::install_fonts(ui.ctx());
+                    crate::theme::apply(ui.ctx(), crate::theme::ThemeKind::Light);
+                    ready = true;
+                    return;
+                }
+                let fonts = Fonts { sources: Some(&[]), shown: tl!("Mixed").into(), mixed_size: true };
+                panel(ui, &Tokens::get(ui.ctx()), look, None, fonts, None);
+            },
+            AddedText::default(),
+        );
+        h.run_steps(4);
+        let field = h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Font size:");
+        let style = h.ctx.global_style();
+        let font = egui::TextStyle::Body.resolve(&style);
+        let width = h.ctx.fonts_mut(|fonts| fonts.layout_no_wrap(tl!("Mixed").into(), font, Color32::BLACK).size().x);
+        let padding = 2.0 * style.spacing.button_padding.x;
+        assert!(field.rect().width() - padding >= width, "Mixed must fit inside the input margins");
+        assert!(h.get_by_label("Alignment").rect().right() <= 272.0, "the wider size field must leave room for the rest of the format row");
+        if let Ok(path) = std::env::var("PDFCRAFT_MIXED_PANEL_SHOT") {
+            h.render().unwrap().save(path).unwrap();
         }
     }
 
