@@ -3510,7 +3510,8 @@ fn transforming_page_images_through_tools() {
     ok(&mut a, "doc_export_images", json!({ "doc": doc, "folder": "src", "dpi": 18, "pages": [1] }));
     let made = ok(&mut a, "doc_create", json!({ "from": "images", "paths": ["src/a_page_1.png"] }))["doc"].as_u64().unwrap();
     let rect = |a: &mut Automation| ok(a, "page_images", json!({ "doc": made, "page": 1 }))["images"][0]["rect"].clone();
-    let transform = |a: &mut Automation, m: Value| ok(a, "image_edit", json!({ "doc": made, "page": 1, "image": 1, "action": "transform", "matrix": m }));
+    let transform =
+        |a: &mut Automation, m: Value| ok(a, "image_edit", json!({ "doc": made, "page": 1, "image": 1, "action": "transform", "matrix": m }));
     ok(&mut a, "image_edit", json!({ "doc": made, "page": 1, "image": 1, "action": "move", "rect": [5, 5, 25, 35] }));
 
     // Right 10, down 20.
