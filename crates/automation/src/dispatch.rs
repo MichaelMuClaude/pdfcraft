@@ -12,6 +12,35 @@ pub enum Content {
     Png { data: Vec<u8>, width: u32, height: u32 },
 }
 
+/// `image_edit` `transform`: a matrix `[a b c d e f]` acting on top-left-origin points (a point
+/// moves to `(a·x + c·y + e, b·x + d·y + f)`) → the same motion in PDF user space, which is
+/// what `ImageEdit::Transform` applies after the image's placement. Both spaces are related by
+/// an affine map, so three corners of the crop box pin the result down.
+fn view_transform_to_user(info: &pdfcraft_render::PageInfo, m: [f64; 6]) -> Result<[f64; 6]> {
+    let [a, b, c, d, e, f] = m;
+    let det = a * d - b * c;
+    if !m.iter().all(|v| v.is_finite()) || !det.is_finite() || det.abs() < 1e-9 {
+        return Err(ToolError::InvalidArgs("transform needs a finite matrix that keeps an area (a·d − b·c must not be 0)".into()));
+    }
+    let moved = |x: f32, y: f32| {
+        let [vx, vy] = info.user_to_view(x, y).map(f64::from);
+        info.view_to_user((a * vx + c * vy + e) as f32, (b * vx + d * vy + f) as f32).map(f64::from)
+    };
+    let [x0, y0, x1, y1] = info.crop;
+    let (w, h) = (f64::from(x1 - x0), f64::from(y1 - y0));
+    if w.abs() < 1e-3 || h.abs() < 1e-3 {
+        return Err(ToolError::InvalidArgs("the page has no area to transform in".into()));
+    }
+    let (o, px, py) = (moved(x0, y0), moved(x1, y0), moved(x0, y1));
+    let (ua, ub, uc, ud) = ((px[0] - o[0]) / w, (px[1] - o[1]) / w, (py[0] - o[0]) / h, (py[1] - o[1]) / h);
+    let (x0, y0) = (f64::from(x0), f64::from(y0));
+    let user = [ua, ub, uc, ud, o[0] - ua * x0 - uc * y0, o[1] - ub * x0 - ud * y0];
+    if !user.iter().all(|v| v.is_finite()) {
+        return Err(ToolError::InvalidArgs("the transform moves the image too far".into()));
+    }
+    Ok(user)
+}
+
 impl Automation {
     /// Run the tool `name` with JSON `args` (an object; `null` means no arguments).
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Vec<Content>> {
@@ -394,6 +423,13 @@ impl Automation {
                             let info = &self.doc(&a)?.info.pages[page];
                             let (u0, u1) = (info.view_to_user(r[0] as f32, r[1] as f32), info.view_to_user(r[2] as f32, r[3] as f32));
                             ImageEdit::Move([u0[0].min(u1[0]) as f64, u0[1].min(u1[1]) as f64, u0[0].max(u1[0]) as f64, u0[1].max(u1[1]) as f64])
+                        }
+                        "transform" => {
+                            let m: Vec<f64> =
+                                a.get("matrix").and_then(Value::as_array).map(|x| x.iter().filter_map(Value::as_f64).collect()).unwrap_or_default();
+                            let m = <[f64; 6]>::try_from(m)
+                                .map_err(|_| ToolError::InvalidArgs("transform needs matrix: 6 numbers [a, b, c, d, e, f]".into()))?;
+                            ImageEdit::Transform(view_transform_to_user(&self.doc(&a)?.info.pages[page], m)?)
                         }
                         "rotate_by" => ImageEdit::RotateBy(
                             a.get("degrees")

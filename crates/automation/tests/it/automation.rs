@@ -3500,6 +3500,51 @@ fn arranging_page_images_through_tools() {
     assert_eq!(after_reopen["images"][1]["rect"], json!([50.0, 50.0, 100.0, 100.0]));
 }
 
+/// The transform a rotated-image resize sends (`ImageEdit::Transform`) is reachable headlessly,
+/// in the same top-left-origin points as the other image tools, also on a turned page.
+#[test]
+fn transforming_page_images_through_tools() {
+    let dir = workdir("transform-page-images");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    ok(&mut a, "doc_export_images", json!({ "doc": doc, "folder": "src", "dpi": 18, "pages": [1] }));
+    let made = ok(&mut a, "doc_create", json!({ "from": "images", "paths": ["src/a_page_1.png"] }))["doc"].as_u64().unwrap();
+    let rect = |a: &mut Automation| ok(a, "page_images", json!({ "doc": made, "page": 1 }))["images"][0]["rect"].clone();
+    let transform = |a: &mut Automation, m: Value| ok(a, "image_edit", json!({ "doc": made, "page": 1, "image": 1, "action": "transform", "matrix": m }));
+    ok(&mut a, "image_edit", json!({ "doc": made, "page": 1, "image": 1, "action": "move", "rect": [5, 5, 25, 35] }));
+
+    // Right 10, down 20.
+    assert_eq!(transform(&mut a, json!([1, 0, 0, 1, 10, 20]))["undo"], "Transform image");
+    assert_eq!(rect(&mut a), json!([15.0, 25.0, 35.0, 55.0]));
+    // Twice the size about the top-left corner of the page.
+    transform(&mut a, json!([2, 0, 0, 2, 0, 0]));
+    assert_eq!(rect(&mut a), json!([30.0, 50.0, 70.0, 110.0]));
+    // A quarter turn, (x, y) → (200 − y, x): the box turns with it, and it undoes in one step.
+    transform(&mut a, json!([0, 1, -1, 0, 200, 0]));
+    assert_eq!(rect(&mut a), json!([90.0, 30.0, 150.0, 70.0]));
+    ok(&mut a, "edit_undo", json!({ "doc": made }));
+    assert_eq!(rect(&mut a), json!([30.0, 50.0, 70.0, 110.0]));
+
+    // On a turned page "right" is still right on screen.
+    ok(&mut a, "page_rotate", json!({ "doc": made, "pages": [1], "degrees": 90 }));
+    let numbers = |v: Value| [0, 1, 2, 3].map(|i| v[i].as_f64().unwrap());
+    let [x0, y0, x1, y1] = numbers(rect(&mut a));
+    transform(&mut a, json!([1, 0, 0, 1, 10, 0]));
+    let after = numbers(rect(&mut a));
+    for (got, want) in after.into_iter().zip([x0 + 10.0, y0, x1 + 10.0, y1]) {
+        assert!((got - want).abs() < 0.015, "{after:?} is not ({x0}, {y0}, {x1}, {y1}) moved right by 10");
+    }
+
+    // Flat, non-finite, short and missing matrices are refused before anything changes.
+    let before = rect(&mut a);
+    for bad in [json!([1, 2, 2, 4, 0, 0]), json!([0, 0, 0, 0, 0, 0]), json!([1e300, 0, 0, 1e300, 0, 0]), json!([1, 0, 0, 1])] {
+        let r = a.call("image_edit", &json!({ "doc": made, "page": 1, "image": 1, "action": "transform", "matrix": bad }));
+        assert!(matches!(r, Err(ToolError::InvalidArgs(_))), "{bad}: {r:?}");
+    }
+    assert!(matches!(a.call("image_edit", &json!({ "doc": made, "page": 1, "image": 1, "action": "transform" })), Err(ToolError::InvalidArgs(_))));
+    assert_eq!(rect(&mut a), before);
+}
+
 #[test]
 fn enhance_camera_image_through_tools() {
     let dir = workdir("enhance-camera");
