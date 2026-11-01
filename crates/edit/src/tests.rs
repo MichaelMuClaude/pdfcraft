@@ -3516,6 +3516,19 @@ fn image_page() -> Document {
     image_page_with("q 200 0 0 100 100 100 cm /Im0 Do Q BT /F1 12 Tf 72 700 Td (Caption) Tj ET")
 }
 
+/// Arrange, Crop and Remove crop as the engine asks for them, through [`images::change_image`].
+fn arrange(doc: &mut Document, page: usize, index: usize, order: images::ArrangeOrder) -> Result<(), EditError> {
+    images::change_image(doc, page, index, &images::ImageChange::Arrange(order))
+}
+
+fn crop(doc: &mut Document, page: usize, index: usize, keep: [f64; 4]) -> Result<(), EditError> {
+    images::change_image(doc, page, index, &images::ImageChange::Crop(keep))
+}
+
+fn remove_crop(doc: &mut Document, page: usize, index: usize) -> Result<(), EditError> {
+    images::change_image(doc, page, index, &images::ImageChange::RemoveCrop)
+}
+
 fn image_page_with(content: &str) -> Document {
     let objs: Vec<String> = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".into(),
@@ -3789,14 +3802,14 @@ fn image_arrange_stacking_order_and_remove_crop() {
     assert!(close(initial_images[1].rect, [200.0, 200.0, 350.0, 350.0]));
 
     // Boundary case: image 0 is already at the back; SendToBack and SendBackward report an error.
-    assert!(images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::SendToBack).is_err());
-    assert!(images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::SendBackward).is_err());
+    assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::SendToBack).is_err());
+    assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::SendBackward).is_err());
     let imgs = images::page_images(&doc, 0).unwrap();
     assert_eq!(imgs.len(), 2);
     assert!(close(imgs[0].rect, initial_images[0].rect));
 
     // Bring forward image 0: moves it past the middle text, but it is still behind image 1.
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringForward).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringForward).unwrap();
     let doc = reopen(&doc);
     let bytes = page_content_bytes(&doc, 0);
     let str_content = String::from_utf8_lossy(&bytes);
@@ -3807,7 +3820,7 @@ fn image_arrange_stacking_order_and_remove_crop() {
 
     // Bring to front on image 0: moves it past image 1 to the front!
     let mut doc = doc;
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let imgs_after_front = images::page_images(&doc, 0).unwrap();
     assert_eq!(imgs_after_front.len(), 2);
@@ -3817,7 +3830,7 @@ fn image_arrange_stacking_order_and_remove_crop() {
 
     // Send to back on the front image (index 1) restores it to the back.
     let mut doc = doc;
-    images::arrange_image(&mut doc, 0, 1, images::ArrangeOrder::SendToBack).unwrap();
+    arrange(&mut doc, 0, 1, images::ArrangeOrder::SendToBack).unwrap();
     let imgs_after_back = images::page_images(&doc, 0).unwrap();
     assert!(close(imgs_after_back[0].rect, [100.0, 100.0, 200.0, 200.0]));
     assert!(close(imgs_after_back[1].rect, [200.0, 200.0, 350.0, 350.0]));
@@ -3827,26 +3840,26 @@ fn image_arrange_stacking_order_and_remove_crop() {
     let mut doc = image_page_with(cropped_content);
     let img_before = &images::page_images(&doc, 0).unwrap()[0];
     assert_ne!(img_before.visible_rect, Some(img_before.rect));
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let img_after = &images::page_images(&doc, 0).unwrap()[0];
     assert_eq!(img_after.visible_rect, Some(img_after.rect));
     // Removing crop again when there is no crop is refused.
     let mut doc = doc;
-    assert!(images::remove_image_crop(&mut doc, 0, 0).is_err());
+    assert!(remove_crop(&mut doc, 0, 0).is_err());
 
-    // Test crop_image
+    // Test crop
     let uncropped_content = "q 200 0 0 100 100 100 cm /Im0 Do Q";
     let mut doc = image_page_with(uncropped_content);
     let img_before = &images::page_images(&doc, 0).unwrap()[0];
     assert_eq!(img_before.visible_rect, Some(img_before.rect));
-    images::crop_image(&mut doc, 0, 0, [120.0, 110.0, 250.0, 180.0]).unwrap();
+    crop(&mut doc, 0, 0, [120.0, 110.0, 250.0, 180.0]).unwrap();
     let doc = reopen(&doc);
     let img_cropped = &images::page_images(&doc, 0).unwrap()[0];
     assert!(close(img_cropped.visible_rect.unwrap(), [120.0, 110.0, 250.0, 180.0]));
-    // And remove_image_crop works on it:
+    // And remove_crop works on it:
     let mut doc = doc;
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let img_restored = &images::page_images(&doc, 0).unwrap()[0];
     assert_eq!(img_restored.visible_rect, Some(img_restored.rect));
@@ -3859,20 +3872,20 @@ fn image_arrange_stacking_order_and_remove_crop() {
     let img_moved = &images::page_images(&doc, 0).unwrap()[0];
     assert_eq!(img_moved.rect, [150.0, 140.0, 350.0, 240.0]);
     let mut doc = doc;
-    images::crop_image(&mut doc, 0, 0, [170.0, 150.0, 300.0, 220.0]).unwrap();
+    crop(&mut doc, 0, 0, [170.0, 150.0, 300.0, 220.0]).unwrap();
     let doc = reopen(&doc);
     let img_crop_moved = &images::page_images(&doc, 0).unwrap()[0];
     assert!(img_crop_moved.visible_rect.is_some(), "cropped image must not be deleted");
     assert!(close(img_crop_moved.visible_rect.unwrap(), [170.0, 150.0, 300.0, 220.0]));
     // Adjust crop (re-crop)
     let mut doc = doc;
-    images::crop_image(&mut doc, 0, 0, [180.0, 160.0, 280.0, 210.0]).unwrap();
+    crop(&mut doc, 0, 0, [180.0, 160.0, 280.0, 210.0]).unwrap();
     let doc = reopen(&doc);
     let img_recropped = &images::page_images(&doc, 0).unwrap()[0];
     assert!(close(img_recropped.visible_rect.unwrap(), [180.0, 160.0, 280.0, 210.0]));
     // Remove crop from moved image
     let mut doc = doc;
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let img_restored_moved = &images::page_images(&doc, 0).unwrap()[0];
     assert_eq!(img_restored_moved.visible_rect, Some(img_restored_moved.rect));
@@ -3887,7 +3900,7 @@ fn crop_rotated_image_preserves_angle_and_in_place_geometry() {
     assert!((m_before[1] - 100.0).abs() < 1e-3);
     assert!((m_before[2] - (-50.0)).abs() < 1e-3);
 
-    images::crop_image(&mut doc, 0, 0, [140.0, 170.0, 180.0, 210.0]).unwrap();
+    crop(&mut doc, 0, 0, [140.0, 170.0, 180.0, 210.0]).unwrap();
     let doc = reopen(&doc);
     let img_cropped = &images::page_images(&doc, 0).unwrap()[0];
 
@@ -3908,7 +3921,7 @@ fn crop_rotated_image_preserves_angle_and_in_place_geometry() {
     assert!(str_content.contains("/Im0 Do"), "{str_content}");
 
     let mut doc = doc;
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let img_restored = &images::page_images(&doc, 0).unwrap()[0];
     assert_eq!(img_restored.matrix, m_before);
@@ -3922,7 +3935,7 @@ fn image_arrange_preserves_shared_group_drawings() {
     assert_eq!(initial.len(), 2, "both images initially present in shared group");
 
     // Bring image 0 to front: it must not delete image 1 that shares the same q...Q group!
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let after = images::page_images(&doc, 0).unwrap();
     assert_eq!(after.len(), 2, "both images must be preserved after BringToFront");
@@ -3945,7 +3958,7 @@ fn marked_sequence(content: &str, mcid: u32) -> &str {
 fn image_arrange_keeps_marked_content_sequences_whole() {
     let content = "/P <</MCID 0>> BDC q 100 0 0 100 50 50 cm /Im0 Do Q EMC /P <</MCID 1>> BDC BT /F1 12 Tf 72 700 Td (Text) Tj ET EMC";
     let mut doc = image_page_with(content);
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let bytes = page_content_bytes(&doc, 0);
     let s = String::from_utf8_lossy(&bytes);
@@ -3961,7 +3974,7 @@ fn image_arrange_keeps_marked_content_sequences_whole() {
 fn image_arrange_moves_a_bmc_sequence_as_a_whole() {
     let content = "/Artifact BMC q 100 0 0 100 50 50 cm /Im0 Do Q EMC BT /F1 12 Tf 72 700 Td (Body) Tj ET";
     let mut doc = image_page_with(content);
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let s = String::from_utf8_lossy(&page_content_bytes(&doc, 0)).into_owned();
     let (art, emc, body, img) = (s.find("/Artifact BMC").unwrap(), s.rfind("EMC").unwrap(), s.find("(Body)").unwrap(), s.find("/Im0 Do").unwrap());
@@ -3975,7 +3988,7 @@ fn arrange_image_in_shared_tagged_block_refuses_or_keeps_tagged() {
     let content =
         "/Figure <</MCID 0>> BDC q 100 0 0 100 50 50 cm /Im0 Do Q BT /F1 9 Tf 50 40 Td (Caption) Tj ET EMC BT /F1 12 Tf 72 700 Td (Body) Tj ET";
     let mut doc = image_page_with(content);
-    let res = images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
+    let res = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
     match res {
         Err(_) => {
             // Refusing is the expected safe behavior when moving out of a shared tagged unit.
@@ -4005,7 +4018,7 @@ fn image_arrange_splits_a_shared_marked_sequence_into_own_tag() {
     let content =
         "/Figure <</MCID 0>> BDC q 100 0 0 100 50 50 cm /Im0 Do Q BT /F1 9 Tf 50 40 Td (Caption) Tj ET EMC BT /F1 12 Tf 72 700 Td (Body) Tj ET";
     let mut doc = image_page_with(content);
-    assert!(images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).is_err());
+    assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).is_err());
 }
 
 /// Send backward also refuses to rearrange an image when it shares its sequence with other content.
@@ -4014,14 +4027,14 @@ fn image_arrange_send_backward_splits_shared_marked_sequence() {
     let content =
         "BT /F1 12 Tf 72 700 Td (Header) Tj ET /Table <</MCID 0>> BDC q 100 0 0 100 50 50 cm /Im0 Do Q BT /F1 9 Tf 50 40 Td (Cell) Tj ET EMC";
     let mut doc = image_page_with(content);
-    assert!(images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::SendBackward).is_err());
+    assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::SendBackward).is_err());
 }
 
 #[test]
 fn arrange_preserves_color_leaking_out_of_marked_content() {
     let content = "/Figure <</MCID 0>> BDC 1 0 0 rg q 100 0 0 100 0 0 cm /Im0 Do Q EMC BT /F1 12 Tf 72 700 Td (Text) Tj ET";
     let mut doc = image_page_with(content);
-    let res = images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
+    let res = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
     if res.is_ok() {
         let bytes = page_content_bytes(&doc, 0);
         let s = String::from_utf8_lossy(&bytes);
@@ -4034,7 +4047,7 @@ fn arrange_preserves_color_leaking_out_of_marked_content() {
 fn arrange_shared_tagged_does_not_duplicate_mcid() {
     let content = "/Figure <</MCID 0>> BDC q 100 0 0 100 0 0 cm /Im0 Do Q 0 0 m 10 10 l S EMC";
     let mut doc = image_page_with(content);
-    assert!(images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::SendToBack).is_err());
+    assert!(arrange(&mut doc, 0, 0, images::ArrangeOrder::SendToBack).is_err());
 }
 
 #[test]
@@ -4047,7 +4060,7 @@ fn image_crop_preserves_outer_cm_for_subsequent_drawings() {
     assert_eq!(initial[1].rect, [50.0, 50.0, 150.0, 150.0]);
 
     // Crop image 0
-    images::crop_image(&mut doc, 0, 0, [60.0, 60.0, 120.0, 120.0]).unwrap();
+    crop(&mut doc, 0, 0, [60.0, 60.0, 120.0, 120.0]).unwrap();
     let doc = reopen(&doc);
     let after = images::page_images(&doc, 0).unwrap();
     assert_eq!(after.len(), 2, "both images must remain");
@@ -4067,7 +4080,7 @@ fn image_arrange_preserves_position_under_active_ctm() {
     assert_eq!(initial[1].rect, [50.0, 50.0, 150.0, 150.0]);
 
     // Move first image to front: must not apply destination CTM twice!
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: check order of operators in the content stream
@@ -4099,7 +4112,7 @@ fn image_arrange_preserves_shared_group_clipping_bounds() {
     assert_eq!(initial[1].visible_rect, Some([120.0, 120.0, 160.0, 160.0]));
 
     // Bring image 0 to front: moves it past the external text while preserving clipping bounds
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: moved image Do now follows External Text in AST
@@ -4128,7 +4141,7 @@ fn image_arrange_preserves_extended_graphics_state_opacity() {
     assert_eq!(initial.len(), 1);
     assert_eq!(initial[0].rect, [50.0, 50.0, 150.0, 150.0]);
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: /Im0 Do moved past External Text
@@ -4157,7 +4170,7 @@ fn image_arrange_preserves_exact_non_rectangular_clipping_path() {
     let initial = images::page_images(&doc, 0).unwrap();
     assert_eq!(initial.len(), 2);
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: moved image follows External Text in AST
@@ -4191,13 +4204,13 @@ fn image_remove_crop_after_arrange_keeps_position_under_outer_transform() {
     let mut doc = image_page_with(content);
     assert_eq!(images::page_images(&doc, 0).unwrap()[0].rect, [50.0, 50.0, 150.0, 150.0]);
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let mut doc = reopen(&doc);
     let moved = images::page_images(&doc, 0).unwrap();
     assert_eq!(moved[0].rect, [50.0, 50.0, 150.0, 150.0]);
     assert_eq!(moved[0].visible_rect, Some([50.0, 50.0, 100.0, 100.0]));
 
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let after = images::page_images(&doc, 0).unwrap();
     assert_eq!(after.len(), 1);
@@ -4215,7 +4228,7 @@ fn image_arrange_refuses_to_move_past_a_clip_it_is_not_under() {
     assert_eq!(images::page_images(&doc, 0).unwrap()[0].visible_rect, Some([50.0, 50.0, 150.0, 150.0]));
 
     for order in [images::ArrangeOrder::BringToFront, images::ArrangeOrder::BringForward] {
-        let err = images::arrange_image(&mut doc, 0, 0, order).unwrap_err();
+        let err = arrange(&mut doc, 0, 0, order).unwrap_err();
         assert!(err.to_string().contains("clipping path"), "{err}");
     }
     assert_eq!(page_content_bytes(&doc, 0), before, "nothing changes");
@@ -4227,7 +4240,7 @@ fn image_arrange_send_to_back_keeps_a_shared_clip() {
     // is no longer under that clip, so the moved unit has to draw it itself.
     let content = "BT /F1 12 Tf 72 700 Td (External Text) Tj ET 0 0 60 60 re W n q 100 0 0 100 50 50 cm /Im0 Do Q";
     let mut doc = image_page_with(content);
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::SendToBack).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::SendToBack).unwrap();
     let doc = reopen(&doc);
     let bytes = page_content_bytes(&doc, 0);
     let str_content = String::from_utf8_lossy(&bytes);
@@ -4251,7 +4264,7 @@ fn unwrapped_image_moves_successfully() {
     assert!(init_do < init_text, "/Im0 Do initially precedes Middle Text");
 
     // Move unwrapped image to front (past Middle Text)
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: /Im0 Do now follows Middle Text in the content stream AST
@@ -4298,7 +4311,6 @@ fn test_arrange_unwrapped_image_extraction() {
 
     assert_eq!(extracted.do_op.op.as_slice(), b"Do");
     assert_eq!(extracted.do_op.name(0), Some(b"Im0".as_slice()));
-    assert_eq!(extracted.effective_cm, pdfcraft_content::Matrix([100.0, 0.0, 0.0, 100.0, 100.0, 100.0]));
 }
 
 #[test]
@@ -4310,7 +4322,7 @@ fn arrange_unwrapped_image_in_mixed_scope_succeeds() {
     let initial = images::page_images(&doc, 0).unwrap();
     assert_eq!(initial.len(), 1);
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     let bytes = page_content_bytes(&doc, 0);
@@ -4336,7 +4348,7 @@ fn image_arrange_with_transformed_clipping_path_succeeds() {
     let rect_before = before[0].rect;
     let clip_before = before[0].visible_rect;
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let after = images::page_images(&doc, 0).unwrap();
     assert_eq!(after.len(), 1);
@@ -4367,7 +4379,7 @@ fn inherited_source_opacity_is_preserved() {
     assert!(init_do < init_text, "/Im0 Do initially precedes External Text");
 
     // Move image to front (past External Text, outside its original outer q...Q scope)
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: /Im0 Do now follows External Text in the AST
@@ -4397,7 +4409,7 @@ fn destination_opacity_pollution_is_prevented() {
     let initial_bytes = page_content_bytes(&doc, 0);
 
     // Attempting to move opaque image 0 to front into active transparency scope must safely bail out with Err
-    let res = images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
+    let res = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
     assert!(res.is_err(), "must return an explicit Err rather than silently corrupting opacity");
     let err_msg = res.unwrap_err().to_string();
     assert!(err_msg.contains("unsupported graphics state"), "error describes unsupported graphics state: {err_msg}");
@@ -4417,7 +4429,7 @@ fn sequential_gs_operators_merging_properties_are_preserved() {
     assert_eq!(initial.len(), 1);
     assert_eq!(initial[0].rect, [50.0, 50.0, 150.0, 150.0]);
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
 
     // 1. Position: /Im0 Do now follows External Text in the AST
@@ -4451,7 +4463,7 @@ fn destination_differing_blend_mode_pollution_is_prevented() {
     let initial_bytes = page_content_bytes(&doc, 0);
 
     // Attempting to move Normal-blend image to front into active Multiply-blend scope must safely bail out with Err
-    let res = images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
+    let res = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
     assert!(res.is_err(), "must return an explicit Err rather than silently altering blend mode");
     let err_msg = res.unwrap_err().to_string();
     assert!(err_msg.contains("unsupported graphics state"), "error describes unsupported graphics state: {err_msg}");
@@ -4496,9 +4508,8 @@ fn nested_soft_masks_replay_in_correct_order_and_effective_mask_is_rendered() {
     let mut doc = nested_soft_mask_page(content);
     let initial = images::page_images(&doc, 0).unwrap();
     assert_eq!(initial.len(), 1);
-    assert_eq!(initial[0].smask, Some(images::MaskIdentity::Group(10, 0)));
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
 
     let content_bytes = page_content_bytes(&doc, 0);
     let str_content = String::from_utf8_lossy(&content_bytes);
@@ -4512,11 +4523,8 @@ fn nested_soft_masks_replay_in_correct_order_and_effective_mask_is_rendered() {
     assert!(after_a < after_b, "Order: outer /GSA gs must be replayed before inner /GSB gs");
     assert!(after_b < after_do, "Order: inner /GSB gs must immediately precede /Im0 Do");
 
-    // 2. Assert effective mask upon saving and reopening is correctly identified as B
-    let reopened_doc = reopen(&doc);
-    let reopened_images = images::page_images(&reopened_doc, 0).unwrap();
-    assert_eq!(reopened_images.len(), 1);
-    assert_eq!(reopened_images[0].smask, Some(images::MaskIdentity::Group(10, 0)));
+    // 2. The image survives saving and reopening.
+    assert_eq!(images::page_images(&reopen(&doc), 0).unwrap().len(), 1);
 
     // 3. Rendered-pixel assertion: render output and verify Mask B (left 50x100) is effective, not Mask A (bottom 100x50)
     let pdf_bytes = write_incremental(&doc, &SaveOptions::default()).unwrap();
@@ -4542,7 +4550,7 @@ fn destination_differing_mask_pollution_is_prevented() {
     let mut doc = nested_soft_mask_page(content);
     let initial_bytes = page_content_bytes(&doc, 0);
 
-    let res = images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
+    let res = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
     assert!(res.is_err(), "must return an explicit Err rather than corrupting mask state");
     let err_msg = res.unwrap_err().to_string();
     assert!(err_msg.contains("unsupported graphics state"), "error describes unsupported graphics state: {err_msg}");
@@ -4605,7 +4613,7 @@ fn non_identity_cm_before_gs_preserves_mask_coordinates_and_rendering() {
     };
 
     // Arrange image: BringToFront
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
 
     let content_bytes = page_content_bytes(&doc, 0);
     let str_content = String::from_utf8_lossy(&content_bytes);
@@ -5143,12 +5151,12 @@ fn arrange_and_crop_image_in_second_content_stream_succeeds() {
     assert_eq!(before[1].name, "Im1");
 
     // Arrange second image (located in the second content stream)
-    images::arrange_image(&mut doc, 0, 1, images::ArrangeOrder::SendToBack).unwrap();
+    arrange(&mut doc, 0, 1, images::ArrangeOrder::SendToBack).unwrap();
     let after_arrange = images::page_images(&reopen(&doc), 0).unwrap();
     assert_eq!(after_arrange.len(), 2);
 
     // Crop image in second stream
-    images::crop_image(&mut doc, 0, 0, [210.0, 210.0, 290.0, 290.0]).unwrap();
+    crop(&mut doc, 0, 0, [210.0, 210.0, 290.0, 290.0]).unwrap();
     let after_crop = images::page_images(&reopen(&doc), 0).unwrap();
     assert_eq!(after_crop.len(), 2);
     assert_eq!(after_crop[0].name, "Im1");
@@ -8517,7 +8525,7 @@ mod proptests {
                 _ => images::ArrangeOrder::SendBackward,
             };
             let mut doc = image_page_with(&String::from_utf8_lossy(&bytes));
-            let _ = images::arrange_image(&mut doc, 0, index, order);
+            let _ = arrange(&mut doc, 0, index, order);
         }
 
         #[test]
@@ -8529,8 +8537,8 @@ mod proptests {
             bytes in proptest::collection::vec(any::<u8>(), 0..1024),
         ) {
             let mut doc = image_page_with(&String::from_utf8_lossy(&bytes));
-            let _ = images::crop_image(&mut doc, 0, 0, [x1, y1, x2, y2]);
-            let _ = images::remove_image_crop(&mut doc, 0, 0);
+            let _ = crop(&mut doc, 0, 0, [x1, y1, x2, y2]);
+            let _ = remove_crop(&mut doc, 0, 0);
         }
     }
 }
@@ -8573,7 +8581,7 @@ fn regression_rects(doc: &Document) -> Vec<[i64; 4]> {
 fn arrange_keeps_cm_leaking_out_of_marked_content() {
     let mut doc = regression_page("/Figure <</MCID 0>> BDC 1 0 0 1 50 50 cm q 100 0 0 100 0 0 cm /Im0 Do Q EMC q 10 0 0 10 200 200 cm /Im0 Do Q");
     let before = regression_rects(&doc);
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     assert_eq!(before, regression_rects(&reopen(&doc)), "other content moved");
 }
 
@@ -8581,7 +8589,7 @@ fn arrange_keeps_cm_leaking_out_of_marked_content() {
 #[test]
 fn crop_form_xobject_keeps_requested_area() {
     let mut doc = regression_page("q 1 0 0 1 100 100 cm /Fm0 Do Q");
-    if images::crop_image(&mut doc, 0, 0, [100.0, 100.0, 200.0, 200.0]).is_err() {
+    if crop(&mut doc, 0, 0, [100.0, 100.0, 200.0, 200.0]).is_err() {
         return; // refusing to crop vector art is also acceptable
     }
     let after = images::page_images(&reopen(&doc), 0).unwrap()[0].clone();
@@ -8593,7 +8601,7 @@ fn crop_form_xobject_keeps_requested_area() {
 #[test]
 fn arrange_tolerates_missing_extgstate() {
     let mut doc = regression_page("q /GSmissing gs 100 0 0 100 50 50 cm /Im0 Do Q /GSone gs q 10 0 0 10 200 200 cm /Im0 Do Q");
-    let r = images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
+    let r = arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront);
     assert!(r.is_ok(), "{r:?}");
 }
 
@@ -8602,7 +8610,7 @@ fn arrange_tolerates_missing_extgstate() {
 fn noop_arrange_is_not_ok_without_change() {
     let mut doc = regression_page("q 10 0 0 10 200 200 cm /Im0 Do Q q 100 0 0 100 50 50 cm /Im0 Do Q");
     let before = write_incremental(&doc, &SaveOptions::default()).unwrap();
-    let r = images::arrange_image(&mut doc, 0, 1, images::ArrangeOrder::BringToFront);
+    let r = arrange(&mut doc, 0, 1, images::ArrangeOrder::BringToFront);
     let after = write_incremental(&doc, &SaveOptions::default()).unwrap();
     assert!(r.is_err() || before != after, "Ok with no change");
 }
@@ -8613,7 +8621,7 @@ fn noop_arrange_is_not_ok_without_change() {
 fn crop_turned_image_preserves_requested_area() {
     let mut doc = regression_page("q 70.71 70.71 -70.71 70.71 300 100 cm /Im0 Do Q");
     let req = [270.0, 150.0, 330.0, 200.0];
-    images::crop_image(&mut doc, 0, 0, req).expect("crop succeeds");
+    crop(&mut doc, 0, 0, req).expect("crop succeeds");
     let after = &images::page_images(&reopen(&doc), 0).unwrap()[0];
     let v = after.visible_rect.expect("visible rect exists");
     assert!((v[0] - req[0]).abs() < 1.0, "x0: expected {}, got {}", req[0], v[0]);
@@ -8894,7 +8902,7 @@ fn arrange_preserves_clip_leaked_out_of_marked_unit() {
     assert!(initial[0].visible_rect.is_some());
     assert!(initial[1].visible_rect.is_none(), "second image is fully clipped initially");
 
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let after = images::page_images(&doc, 0).unwrap();
     assert_eq!(after.len(), 2);
@@ -8905,7 +8913,7 @@ fn arrange_preserves_clip_leaked_out_of_marked_unit() {
     let content_cm_clip =
         "/Figure <</MCID 0>> BDC 2 0 0 2 0 0 cm 0 0 300 300 re W n q 10 0 0 10 50 50 cm /Im0 Do Q EMC q 10 0 0 10 400 400 cm /Im0 Do Q";
     let mut doc3 = image_page_with(content_cm_clip);
-    let res3 = images::arrange_image(&mut doc3, 0, 0, images::ArrangeOrder::BringToFront);
+    let res3 = arrange(&mut doc3, 0, 0, images::ArrangeOrder::BringToFront);
     assert!(res3.is_err(), "moving marked unit with both leaking cm and leaking clip must be refused");
 }
 
@@ -8913,7 +8921,7 @@ fn arrange_preserves_clip_leaked_out_of_marked_unit() {
 fn arrange_preserves_leaked_color_and_text_state() {
     let content = "/Figure <</MCID 0>> BDC /DeviceRGB cs 1 0 0 sc /F1 14 Tf 2 Tc q 10 0 0 10 50 50 cm /Im0 Do Q EMC 0 0 10 10 re f q 10 0 0 10 200 200 cm /Im0 Do Q";
     let mut doc = image_page_with(content);
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let doc = reopen(&doc);
     let bytes = page_content_bytes(&doc, 0);
     let s = String::from_utf8_lossy(&bytes);
@@ -8951,7 +8959,7 @@ fn arrange_preserves_inherited_drawing_state_for_stencil_and_form() {
     assert_eq!(page_before.rgba[stencil_pixel_idx..stencil_pixel_idx + 3], [255, 0, 0], "stencil starts red");
 
     // Bring to front
-    images::arrange_image(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
 
     // Save and reopen
     let doc = reopen(&doc);
@@ -8988,7 +8996,7 @@ fn arrange_preserves_inherited_drawing_state_for_stencil_and_form() {
     let form_pixel_idx = (((form_page_before.height - 75) * form_page_before.width + 75) * 4) as usize;
     assert_eq!(form_page_before.rgba[form_pixel_idx..form_pixel_idx + 3], [0, 255, 0], "form starts green");
 
-    images::arrange_image(&mut form_doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+    arrange(&mut form_doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
     let form_doc = reopen(&form_doc);
 
     let form_pdf_after = write_incremental(&form_doc, &SaveOptions::default()).unwrap();
@@ -9751,7 +9759,7 @@ fn image_exclusive_scope_resets_path_on_scope_exit() {
     let mut doc = image_page_with(content);
     let before = images::page_images(&doc, 0).unwrap();
     assert_eq!(before.len(), 1);
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
 }
 
 #[test]
@@ -9778,26 +9786,12 @@ fn different_inline_soft_masks_have_distinct_identities() {
     dict2.set(b"SMask".to_vec(), Object::Dict(mask2));
 
     let mut state1 = images::EffectiveGState::default();
-    state1.merge_dict(&dict1, &doc, None);
+    state1.merge_dict(&dict1, &doc, b"GS1");
 
     let mut state2 = images::EffectiveGState::default();
-    state2.merge_dict(&dict2, &doc, None);
+    state2.merge_dict(&dict2, &doc, b"GS2");
 
     assert!(state1.visually_differs(&state2), "two different inline soft masks must visually differ");
-}
-
-#[test]
-fn cid_to_gid_map_odd_length_is_trimmed_to_even() {
-    let mut m_bytes = vec![0u8, 1u8, 0u8, 2u8, 0u8];
-    let needed_len = 5;
-    if m_bytes.len() > needed_len {
-        m_bytes.truncate(needed_len);
-    }
-    if m_bytes.len() % 2 != 0 {
-        m_bytes.pop();
-    }
-    assert_eq!(m_bytes.len(), 4);
-    assert_eq!(m_bytes.len() % 2, 0);
 }
 
 #[test]
@@ -9840,7 +9834,7 @@ fn crop_image_with_leading_cm_in_scope_places_clip_before_internal_cm() {
     let mut doc = image_page_with(content);
     let before = images::page_images(&doc, 0).unwrap();
     assert_eq!(before.len(), 1);
-    images::crop_image(&mut doc, 0, 0, [50.0, 50.0, 55.0, 55.0]).unwrap();
+    crop(&mut doc, 0, 0, [50.0, 50.0, 55.0, 55.0]).unwrap();
     let doc = reopen(&doc);
     let after = images::page_images(&doc, 0).unwrap();
     assert_eq!(after.len(), 1);
@@ -9857,7 +9851,7 @@ fn remove_crop_preserves_cm_before_extgstate() {
     let mut doc = image_page_with(content);
     let before = images::page_images(&doc, 0).unwrap();
     assert_eq!(before.len(), 1);
-    images::remove_image_crop(&mut doc, 0, 0).unwrap();
+    remove_crop(&mut doc, 0, 0).unwrap();
     let doc = reopen(&doc);
     let bytes = page_content_bytes(&doc, 0);
     let s = String::from_utf8_lossy(&bytes);

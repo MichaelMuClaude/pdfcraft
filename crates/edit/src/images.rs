@@ -13,23 +13,13 @@ use crate::text::content_streams;
 
 /// The identity of a soft mask (`/SMask`) in the PDF graphics state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MaskIdentity {
+pub(crate) enum MaskIdentity {
     /// Indirect reference to a mask dictionary or stream.
     Ref(u32, u16),
     /// Indirect reference to the transparency group (`/G`) in a mask dictionary.
     Group(u32, u16),
     /// Explicit named mask or resource name.
     Named(Vec<u8>),
-}
-
-impl std::fmt::Display for MaskIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MaskIdentity::Ref(num, generation) => write!(f, "{num} {generation} R"),
-            MaskIdentity::Group(num, generation) => write!(f, "group {num} {generation} R"),
-            MaskIdentity::Named(name) => write!(f, "{}", String::from_utf8_lossy(name)),
-        }
-    }
 }
 
 /// An image drawn on a page.
@@ -52,8 +42,6 @@ pub struct PageImage {
     /// Pixel size; zero for vector/grouped Form artwork.
     pub width: u32,
     pub height: u32,
-    /// Active soft mask identity at the image placement, if any.
-    pub smask: Option<MaskIdentity>,
     /// The content stream its `Do` (its first token) is in, and the `Do`'s index among the
     /// operators of the page's streams joined ([`Pieces`]).
     pub stream: usize,
@@ -276,16 +264,12 @@ impl ImageState {
 pub fn page_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, EditError> {
     let p = page_of(doc, page)?;
     let xo = xobjects(doc, &p.dict);
-    let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
-    let ext_gstates = res.get(b"ExtGState").map(|g| doc.resolve(g)).and_then(|g| g.as_dict().cloned()).unwrap_or_default();
     let mut out = Vec::new();
     // The streams are one stream in pieces, so the graphics state and operators carry over.
     let mut state = ImageState::new(Matrix::IDENTITY, p.crop(doc), Vec::new());
-    let mut tracker = ExtendedGStateTracker::default();
     let pieces = joined(&content_streams(doc, &p.dict)?);
     for (i, op) in pieces.parse().ops.iter().enumerate() {
         state.apply(op)?;
-        tracker.step(op, &ext_gstates, doc, state.placement.matrix)?;
         let ctm = state.placement.matrix;
         if op.is("Do") {
             let Some(name) = op.name(0) else { continue };
@@ -345,7 +329,6 @@ pub fn page_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, EditEr
                 is_form,
                 width: if is_form { 0 } else { s.dict.int(b"Width").unwrap_or(0).clamp(0, u32::MAX as i64) as u32 },
                 height: if is_form { 0 } else { s.dict.int(b"Height").unwrap_or(0).clamp(0, u32::MAX as i64) as u32 },
-                smask: tracker.current_state.smask.clone(),
                 stream: pieces.piece_of(op.span.start),
                 op: i,
                 draw_matrix: ctm.0,
@@ -422,7 +405,6 @@ pub fn reading_images(doc: &Document, page: usize) -> Result<Vec<PageImage>, Edi
                     is_form: false,
                     width: s.dict.int(b"Width").unwrap_or(0).max(0) as u32,
                     height: s.dict.int(b"Height").unwrap_or(0).max(0) as u32,
-                    smask: None,
                     stream: stream(op),
                     op: i,
                     draw_matrix: ctm.0,
@@ -684,7 +666,6 @@ pub(crate) fn content_units(ops: &[Op], scan_start: usize, scan_end: usize) -> V
 pub(crate) struct ExtractedScopeState {
     pub clip_ops: Vec<Op>,
     pub state_ops: Vec<Op>,
-    pub effective_cm: Matrix,
     pub do_op: Op,
 }
 
@@ -697,30 +678,16 @@ pub(crate) struct EffectiveGState {
 }
 
 impl EffectiveGState {
-    pub(crate) fn effective_ca(&self) -> f64 {
-        self.ca.unwrap_or(1.0)
-    }
-
-    pub(crate) fn effective_ca_stroke(&self) -> f64 {
-        self.ca_stroke.unwrap_or(1.0)
-    }
-
-    pub(crate) fn effective_bm(&self) -> &[u8] {
-        self.bm.as_deref().unwrap_or(b"Normal")
-    }
-
-    pub(crate) fn effective_smask(&self) -> Option<&MaskIdentity> {
-        self.smask.as_ref()
-    }
-
     pub(crate) fn visually_differs(&self, other: &EffectiveGState) -> bool {
-        (self.effective_ca() - other.effective_ca()).abs() > 1e-4
-            || (self.effective_ca_stroke() - other.effective_ca_stroke()).abs() > 1e-4
-            || self.effective_bm() != other.effective_bm()
-            || self.effective_smask() != other.effective_smask()
+        (self.ca.unwrap_or(1.0) - other.ca.unwrap_or(1.0)).abs() > 1e-4
+            || (self.ca_stroke.unwrap_or(1.0) - other.ca_stroke.unwrap_or(1.0)).abs() > 1e-4
+            || self.bm.as_deref().unwrap_or(b"Normal") != other.bm.as_deref().unwrap_or(b"Normal")
+            || self.smask != other.smask
     }
 
-    pub(crate) fn merge_dict(&mut self, dict: &Dict, doc: &Document, gs_name: Option<&[u8]>) {
+    /// Merge the `gs_name` ExtGState `dict`. An inline soft mask with no group of its own is
+    /// known by the name of the ExtGState that sets it.
+    pub(crate) fn merge_dict(&mut self, dict: &Dict, doc: &Document, gs_name: &[u8]) {
         if let Some(val) = dict.get(b"ca").map(|v| doc.resolve(v)).and_then(|v| v.as_f64()) {
             self.ca = Some(val);
         }
@@ -751,18 +718,8 @@ impl EffectiveGState {
                     self.smask = Some(MaskIdentity::Ref(r.num, r.generation));
                 } else if let Some(name) = mask_dict.get(b"Name").map(|n| doc.resolve(n)).and_then(|n| n.as_name().map(|s| s.to_vec())) {
                     self.smask = Some(MaskIdentity::Named(name));
-                } else if let Some(name) = gs_name {
-                    self.smask = Some(MaskIdentity::Named(name.to_vec()));
                 } else {
-                    use std::collections::hash_map::DefaultHasher;
-                    use std::hash::{Hash, Hasher};
-                    let mut hasher = DefaultHasher::new();
-                    for (k, v) in mask_dict.iter() {
-                        k.as_slice().hash(&mut hasher);
-                        format!("{v:?}").hash(&mut hasher);
-                    }
-                    let id = format!("InlineMask_{:016x}", hasher.finish());
-                    self.smask = Some(MaskIdentity::Named(id.into_bytes()));
+                    self.smask = Some(MaskIdentity::Named(gs_name.to_vec()));
                 }
             } else if let Some(r) = raw_smask.as_ref() {
                 self.smask = Some(MaskIdentity::Ref(r.num, r.generation));
@@ -781,36 +738,29 @@ struct ExtendedGStateTracker {
     stack: Vec<(EffectiveGState, ActiveGsOps)>,
     current_state: EffectiveGState,
     active_gs_ops: ActiveGsOps,
-    overflow_depth: usize,
 }
 
 impl ExtendedGStateTracker {
     fn step(&mut self, op: &Op, ext_gstates: &Dict, doc: &Document, ctm: Matrix) -> Result<(), EditError> {
         match op.op.as_slice() {
             b"q" => {
-                if self.stack.len() >= 4096 || self.overflow_depth > 0 {
-                    self.overflow_depth = self.overflow_depth.saturating_add(1);
+                if self.stack.len() >= 4096 {
                     return Err(EditError::Invalid("the image graphics state is too deeply nested".into()));
                 }
                 self.stack.push((self.current_state.clone(), std::rc::Rc::clone(&self.active_gs_ops)));
             }
             b"Q" => {
-                if self.overflow_depth > 0 {
-                    self.overflow_depth = self.overflow_depth.saturating_sub(1);
-                } else if let Some((prev_state, prev_ops)) = self.stack.pop() {
+                if let Some((prev_state, prev_ops)) = self.stack.pop() {
                     self.current_state = prev_state;
                     self.active_gs_ops = prev_ops;
                 }
             }
             b"gs" => {
-                if self.overflow_depth > 0 {
-                    return Ok(());
-                }
                 let valid_gs = op
                     .name(0)
                     .and_then(|name| ext_gstates.get(name).map(|v| doc.resolve(v)).and_then(|v| v.as_dict().cloned()).map(|dict| (name, dict)));
                 if let Some((name, dict)) = valid_gs {
-                    self.current_state.merge_dict(&dict, doc, Some(name));
+                    self.current_state.merge_dict(&dict, doc, name);
                     let mut next = (*self.active_gs_ops).clone();
                     if let Some(pos) = next.iter().position(|(k, _, _)| k.as_slice() == name) {
                         if let Some(entry) = next.get_mut(pos) {
@@ -1087,7 +1037,7 @@ pub(crate) fn extract_scope_state(ops: &[Op], start: usize, target: usize, initi
     }
     let target_op = ops.get(target).cloned().ok_or_else(|| EditError::Invalid("the image operation is missing".into()))?;
     if start == target {
-        return Ok(Some(ExtractedScopeState { clip_ops: Vec::new(), state_ops: Vec::new(), effective_cm: initial_ctm, do_op: target_op }));
+        return Ok(Some(ExtractedScopeState { clip_ops: Vec::new(), state_ops: Vec::new(), do_op: target_op }));
     }
     let mut clip_ops = Vec::new();
     let mut state_ops = Vec::new();
@@ -1178,7 +1128,7 @@ pub(crate) fn extract_scope_state(ops: &[Op], start: usize, target: usize, initi
         return Ok(None);
     }
 
-    Ok(Some(ExtractedScopeState { clip_ops, state_ops, effective_cm: matrix, do_op: target_op }))
+    Ok(Some(ExtractedScopeState { clip_ops, state_ops, do_op: target_op }))
 }
 
 /// Change the stacking order of image `index` on `page`.
@@ -1549,7 +1499,7 @@ pub fn arrange_image(doc: &mut Document, page: usize, index: usize, order: Arran
         if let Some(name) = op.name(0)
             && let Some(dict) = ext_gstates.get(name).map(|v| doc.resolve(v)).and_then(|v| v.as_dict().cloned())
         {
-            reconstructed_state.merge_dict(&dict, doc, Some(name));
+            reconstructed_state.merge_dict(&dict, doc, name);
         }
     }
 
@@ -1739,11 +1689,6 @@ pub fn remove_image_crop(doc: &mut Document, page: usize, index: usize) -> Resul
     let contents = crate::text::rewritten_contents(doc, &all, changed);
     doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), contents))?;
     Ok(())
-}
-
-/// Crop image `index` on `page` to `crop_rect` in user space `[x0, y0, x1, y1]`.
-pub fn crop_image(doc: &mut Document, page: usize, index: usize, crop_rect: [f64; 4]) -> Result<(), EditError> {
-    change_image(doc, page, index, &ImageChange::Crop(crop_rect))
 }
 
 /// Change image `index` (from [`page_images`]) on `page`.
