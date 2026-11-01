@@ -52,6 +52,11 @@ pub struct PageImage {
 }
 
 impl PageImage {
+    /// Whether an active clip was written by PdfCraft's image crop tool.
+    pub fn has_editor_crop(&self) -> bool {
+        self.clips.iter().any(|clip| clip.app_crop)
+    }
+
     /// Whether a user-space point belongs to the placed artwork and every active clip.
     pub fn contains(&self, point: [f64; 2]) -> bool {
         if !point.iter().all(|v| v.is_finite()) {
