@@ -651,7 +651,7 @@ pub(crate) struct EffectiveGState {
     pub(crate) smask: Option<MaskIdentity>,
     // Printing parameters cannot generally be reset by a content-stream operator. Retain their
     // exact values so Arrange refuses a destination whose state it cannot reconstruct.
-    print_params: std::collections::BTreeMap<Vec<u8>, Object>,
+    print_params: std::collections::BTreeMap<Vec<u8>, std::rc::Rc<Object>>,
     rendering_intent: Option<Vec<u8>>,
 }
 
@@ -669,7 +669,7 @@ impl EffectiveGState {
     pub(crate) fn merge_dict(&mut self, dict: &Dict, doc: &Document, gs_name: &[u8]) {
         for key in [b"TR".as_slice(), b"TR2", b"OP", b"op", b"OPM", b"BG", b"BG2", b"UCR", b"UCR2", b"HT"] {
             if let Some(value) = dict.get(key) {
-                self.print_params.insert(key.to_vec(), value.clone());
+                self.print_params.insert(key.to_vec(), std::rc::Rc::new(value.clone()));
             }
         }
         if let Some(intent) = dict.get(b"RI").map(|v| doc.resolve(v)).and_then(|v| v.as_name().map(<[u8]>::to_vec)) {
@@ -771,20 +771,24 @@ const DRAWING_PARAMS: [&str; 7] = ["w", "J", "j", "M", "d", "ri", "i"];
 
 #[derive(Clone, Default, Debug, PartialEq)]
 struct DrawingState {
-    non_stroking_color: Option<Vec<Op>>,
-    stroking_color: Option<Vec<Op>>,
+    non_stroking_color: Option<SharedColorOps>,
+    stroking_color: Option<SharedColorOps>,
     /// The last operator of each of [`DRAWING_PARAMS`].
-    params: [Option<Op>; 7],
+    params: [Option<std::rc::Rc<Op>>; 7],
 }
 
+// Save/restore shares operand storage, including when only the current colour changes under q.
+type SharedColorOps = std::rc::Rc<Vec<std::rc::Rc<Op>>>;
+
 /// Keep the explicit or implicit colour-space selector before `sc`/`scn` (or `SC`/`SCN`).
-fn set_color(slot: &mut Option<Vec<Op>>, op: &Op, space: &str) {
+fn set_color(slot: &mut Option<SharedColorOps>, op: &Op, space: &str) {
     match slot {
         Some(ops) if ops.first().is_some_and(|o| o.is(space) || matches!(o.op.as_slice(), b"g" | b"rg" | b"k" | b"G" | b"RG" | b"K")) => {
+            let ops = std::rc::Rc::make_mut(ops);
             ops.truncate(1);
-            ops.push(op.clone());
+            ops.push(std::rc::Rc::new(op.clone()));
         }
-        _ => *slot = Some(vec![op.clone()]),
+        _ => *slot = Some(std::rc::Rc::new(vec![std::rc::Rc::new(op.clone())])),
     }
 }
 
@@ -808,13 +812,13 @@ impl DrawingStateTracker {
                     self.current = prev;
                 }
             }
-            b"g" | b"rg" | b"k" | b"cs" => self.current.non_stroking_color = Some(vec![op.clone()]),
+            b"g" | b"rg" | b"k" | b"cs" => self.current.non_stroking_color = Some(std::rc::Rc::new(vec![std::rc::Rc::new(op.clone())])),
             b"sc" | b"scn" => set_color(&mut self.current.non_stroking_color, op, "cs"),
-            b"G" | b"RG" | b"K" | b"CS" => self.current.stroking_color = Some(vec![op.clone()]),
+            b"G" | b"RG" | b"K" | b"CS" => self.current.stroking_color = Some(std::rc::Rc::new(vec![std::rc::Rc::new(op.clone())])),
             b"SC" | b"SCN" => set_color(&mut self.current.stroking_color, op, "CS"),
             _ => {
                 if let Some(slot) = DRAWING_PARAMS.iter().position(|p| op.is(p)).and_then(|k| self.current.params.get_mut(k)) {
-                    *slot = Some(op.clone());
+                    *slot = Some(std::rc::Rc::new(op.clone()));
                 }
             }
         }
@@ -847,14 +851,14 @@ fn compute_inherited_drawing_ops(source: &DrawingState, dest: &DrawingState, ext
     ] {
         match (own, source, dest) {
             (true, _, _) | (false, None, None) => {}
-            (false, Some(color), _) => ops.extend(color.iter().cloned()),
+            (false, Some(color), _) => ops.extend(color.iter().map(|op| (**op).clone())),
             (false, None, Some(_)) => ops.push(Op::new(black, vec![pdfcraft_content::num(0.0)])),
         }
     }
     for ((name, source), dest) in DRAWING_PARAMS.iter().zip(&source.params).zip(&dest.params) {
         match (sets(&[name]), source, dest) {
             (true, _, _) | (false, None, None) => {}
-            (false, Some(op), _) => ops.push(op.clone()),
+            (false, Some(op), _) => ops.push((**op).clone()),
             (false, None, Some(_)) => ops.extend(initial_param(name)),
         }
     }
@@ -1862,4 +1866,31 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
     let contents = crate::text::rewritten_contents(doc, &all, data);
     doc.update_dict(p.obj, |d| d.set(b"Contents".to_vec(), contents))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn saved_drawing_states_share_large_operand_storage() {
+        let mut tracker = DrawingStateTracker::default();
+        let parsed = parse(b"[1 2 3 4 5 6 7 8] 0 d /Pattern cs 1 2 3 4 5 6 /P scn q q q");
+        for op in &parsed.ops {
+            tracker.step(op).unwrap();
+        }
+        for state in &tracker.stack {
+            let dash = state.params[4].as_ref().unwrap();
+            let current_dash = tracker.current.params[4].as_ref().unwrap();
+            assert!(std::ptr::eq(dash.operands.as_ptr(), current_dash.operands.as_ptr()), "q must share the dash operands instead of cloning them");
+            let color = state.non_stroking_color.as_ref().unwrap().last().unwrap();
+            let current_color = tracker.current.non_stroking_color.as_ref().unwrap().last().unwrap();
+            assert!(std::ptr::eq(color.operands.as_ptr(), current_color.operands.as_ptr()), "q must share scn operands instead of cloning them");
+        }
+        let saved = tracker.current.clone();
+        for op in &parse(b"[9 10] 0 d 4 5 6 /Other scn Q").ops {
+            tracker.step(op).unwrap();
+        }
+        assert_eq!(tracker.current, saved, "changing shared operands must preserve the saved state");
+    }
 }
