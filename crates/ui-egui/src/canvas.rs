@@ -3861,14 +3861,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         can_paste_image,
     };
     let mut page_out = PageOut::default();
-    let fade_strength = ui.spacing().scroll.fade.strength;
-    if !app.show_page_edge_shadows {
-        ui.spacing_mut().scroll.fade.strength = 0.0;
-    }
-    let out = page_scroll(ui, scroll, egui::Id::unique(("page-view-scope", view.id)), |ui, viewport| {
+    let out = page_scroll(ui, scroll, egui::Id::unique(("page-view-scope", view.id)), app.show_page_edge_shadows, |ui, viewport| {
         draw_pages(ui, viewport, view, &env, &mut page_out, &mut app.signature_preview)
     });
-    ui.spacing_mut().scroll.fade.strength = fade_strength;
     let PageOut {
         canvas_action,
         clicked_link,
