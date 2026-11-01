@@ -9417,3 +9417,135 @@ fn author_image_clip_is_not_offered_as_a_removable_editor_crop() {
     h.run_steps(2);
     assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().page_images(0)[0].visible_rect, Some(visible));
 }
+
+fn affine_review_image_fixture(matrix: [f64; 6], clip: Option<[f64; 4]>, rotation: i64) -> Vec<u8> {
+    use pdfcraft_cos::{Dict, Document, Object, Stream};
+    let mut doc = Document::open(std::sync::Arc::new(fixture(1))).unwrap();
+    let page = pdfcraft_model::pages(&doc).remove(0);
+    let mut image = Dict::new();
+    image.set(b"Type".to_vec(), Object::name("XObject"));
+    image.set(b"Subtype".to_vec(), Object::name("Image"));
+    image.set(b"Width".to_vec(), Object::Int(1));
+    image.set(b"Height".to_vec(), Object::Int(1));
+    image.set(b"BitsPerComponent".to_vec(), Object::Int(8));
+    image.set(b"ColorSpace".to_vec(), Object::name("DeviceRGB"));
+    let image = doc.add(Object::Stream(Stream::flate(image, &[220, 80, 50])));
+    let mut xobjects = Dict::new();
+    xobjects.set(b"ImReview".to_vec(), Object::Ref(image));
+    let mut resources = Dict::new();
+    resources.set(b"XObject".to_vec(), Object::Dict(xobjects));
+    let mut content = String::from("q ");
+    if let Some([x0, y0, x1, y1]) = clip {
+        content.push_str(&format!("{x0} {y0} {} {} re W n ", x1 - x0, y1 - y0));
+    }
+    let [a, b, c, d, e, f] = matrix;
+    content.push_str(&format!("{a} {b} {c} {d} {e} {f} cm /ImReview Do Q"));
+    let stream = doc.add(Object::Stream(Stream::flate(Dict::new(), content.as_bytes())));
+    doc.update_dict(page.obj, |dict| {
+        dict.set(b"Contents".to_vec(), Object::Ref(stream));
+        dict.set(b"Resources".to_vec(), Object::Dict(resources));
+        dict.set(b"MediaBox".to_vec(), Object::Array(vec![Object::Int(0), Object::Int(0), Object::Int(360), Object::Int(360)]));
+        dict.set(b"Rotate".to_vec(), Object::Int(rotation));
+    })
+    .unwrap();
+    pdfcraft_cos::write_incremental(&doc, &Default::default()).unwrap()
+}
+
+fn affine_review_harness(bytes: Vec<u8>) -> Harness<'static, PdfCraftApp> {
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 1000.0)).build_eframe(move |_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("affine-review.pdf", None, bytes.clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    h.state_mut().views[0].fit = pdfcraft_ui_egui::canvas::Fit::Page;
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.state_mut().views[0].image_selection = Some(pdfcraft_ui_egui::ImageSelection::at(0, 0));
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn affine_review_resize_out_and_back_preserves_saved_placement() {
+    for (matrix, clip, rotation) in [
+        ([100.0, 0.0, 0.0, 100.0, 100.0, 100.0], None, 0),
+        ([100.0, 0.0, 50.0, 100.0, 100.0, 100.0], None, 0),
+        ([86.60254, 50.0, -50.0, 86.60254, 150.0, 100.0], None, 0),
+        ([100.0, 0.0, 0.0, 100.0, 100.0, 100.0], Some([100.0, 100.0, 150.0, 200.0]), 90),
+    ] {
+        for offset in [egui::Vec2::ZERO, egui::vec2(3.0, 4.0)] {
+            let mut h = affine_review_harness(affine_review_image_fixture(matrix, clip, rotation));
+            let view = &h.state().views[0];
+            let id = view.id;
+            let doc = h.state().session.get(id).unwrap();
+            let original = doc.page_images(0)[0].matrix;
+            let before = h.state().session.save_bytes(id).unwrap();
+            let obb = pdfcraft_ui_egui::canvas::ImageObb::from_image(&doc.page_images(0)[0], &view.page_xform(0).unwrap(), &doc.info, 0);
+            let start = obb.handle_pos(pdfcraft_ui_egui::ImageHandle::TopRight) + offset;
+            h.hover_at(start);
+            h.run_steps(1);
+            h.drag_at(start);
+            h.run_steps(1);
+            h.hover_at(start + egui::vec2(30.0, -25.0));
+            h.run_steps(2);
+            h.hover_at(start);
+            h.run_steps(2);
+            h.drop_at(start);
+            h.run_steps(3);
+            let saved = h.state().session.save_bytes(id).unwrap();
+            assert!(saved == before, "out-and-back must not create an edit: matrix={matrix:?} clip={clip:?} rotation={rotation} offset={offset:?}");
+            assert_eq!(h.state().session.get(id).unwrap().can_undo(), None);
+            let mut reopened = pdfcraft_engine::Session::new();
+            let reopened_id = reopened.open("saved.pdf", None, saved, None).unwrap();
+            assert_eq!(reopened.get(reopened_id).unwrap().page_images(0)[0].matrix, original);
+        }
+    }
+}
+
+#[test]
+fn affine_review_resize_uses_press_delta_and_affine_frame() {
+    for (matrix, clip, rotation) in [
+        ([100.0, 0.0, 0.0, 100.0, 100.0, 100.0], None, 0),
+        ([100.0, 0.0, 50.0, 100.0, 100.0, 100.0], None, 0),
+        ([86.60254, 50.0, -50.0, 86.60254, 150.0, 100.0], None, 0),
+        ([100.0, 0.0, 0.0, 100.0, 100.0, 100.0], Some([100.0, 100.0, 150.0, 200.0]), 90),
+    ] {
+        let mut placements = Vec::new();
+        for offset in [egui::Vec2::ZERO, egui::vec2(3.0, 4.0)] {
+            let mut h = affine_review_harness(affine_review_image_fixture(matrix, clip, rotation));
+            let view = &h.state().views[0];
+            let id = view.id;
+            let doc = h.state().session.get(id).unwrap();
+            let xf = view.page_xform(0).unwrap();
+            let obb = pdfcraft_ui_egui::canvas::ImageObb::from_image(&doc.page_images(0)[0], &xf, &doc.info, 0);
+            let grip = obb.handle_pos(pdfcraft_ui_egui::ImageHandle::TopRight);
+            let start = grip + offset;
+            let finish = start + (grip - obb.screen_center) * 0.2;
+            h.hover_at(start);
+            h.run_steps(1);
+            h.drag_at(start);
+            h.run_steps(1);
+            h.hover_at(finish);
+            h.run_steps(2);
+            h.drop_at(finish);
+            h.run_steps(3);
+            let saved = h.state().session.save_bytes(id).unwrap();
+            let mut reopened = pdfcraft_engine::Session::new();
+            let reopened_id = reopened.open("saved.pdf", None, saved, None).unwrap();
+            let after = reopened.get(reopened_id).unwrap().page_images(0)[0].clone();
+            let after_obb = pdfcraft_ui_egui::canvas::ImageObb::from_image(&after, &xf, &reopened.get(reopened_id).unwrap().info, 0);
+            assert!(
+                after_obb.handle_pos(pdfcraft_ui_egui::ImageHandle::BottomLeft).distance(obb.handle_pos(pdfcraft_ui_egui::ImageHandle::BottomLeft))
+                    < 0.1,
+                "opposite affine grip moved: {matrix:?} clip={clip:?} rotation={rotation}"
+            );
+            assert!(
+                after_obb.handle_pos(pdfcraft_ui_egui::ImageHandle::TopRight).distance(grip + (grip - obb.screen_center) * 0.2) < 0.2,
+                "resized affine frame missed the press-relative target: {matrix:?} clip={clip:?} rotation={rotation} offset={offset:?}"
+            );
+            placements.push(after.matrix);
+        }
+        assert!(placements[0].into_iter().zip(placements[1]).all(|(a, b)| (a - b).abs() < 1e-3), "press offset changed placement: {placements:?}");
+    }
+}

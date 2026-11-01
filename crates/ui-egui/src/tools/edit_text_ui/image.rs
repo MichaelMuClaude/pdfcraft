@@ -66,6 +66,7 @@ pub struct ImageDrag {
     pub start: Pos2,
     pub target: DragTarget,
     pub initial_rect: Rect,
+    /// Captured user-space frame: the visible crop for resizing, full placement for moving.
     pub initial_matrix: [f64; 6],
 }
 
@@ -124,6 +125,57 @@ impl CropMode {
 }
 
 pub(crate) use pdfcraft_content::Matrix;
+
+/// The displayed crop frame, expressed in page user space, rather than the full image placement.
+fn resize_frame(obb: &ImageObb, xf: &PageXform, info: &DocInfo, page: usize) -> Matrix {
+    let p00 = screen_to_user(xf, info, page, obb.s00);
+    let p10 = screen_to_user(xf, info, page, obb.s10);
+    let p01 = screen_to_user(xf, info, page, obb.s01);
+    Matrix([p10.0 - p00.0, p10.1 - p00.1, p01.0 - p00.0, p01.1 - p00.1, p00.0, p00.1])
+}
+
+/// Resize from the captured press displacement in the frame's actual affine basis.
+fn resize_affine_frame(frame: Matrix, handle: ImageHandle, delta: (f64, f64), proportional: bool) -> Option<Matrix> {
+    if !frame.0.iter().all(|v| v.is_finite()) || !delta.0.is_finite() || !delta.1.is_finite() {
+        return None;
+    }
+    if delta == (0.0, 0.0) {
+        return Some(frame);
+    }
+    let [a, b, c, d, _, _] = frame.0;
+    let inverse_basis = Matrix([a, b, c, d, 0.0, 0.0]).invert()?;
+    let (du, dv) = inverse_basis.apply(delta.0, delta.1);
+    if !du.is_finite() || !dv.is_finite() {
+        return None;
+    }
+    let (u, v) = match handle {
+        ImageHandle::TopRight => (1.0, 1.0),
+        ImageHandle::TopLeft => (-1.0, 1.0),
+        ImageHandle::BottomLeft => (-1.0, -1.0),
+        ImageHandle::BottomRight => (1.0, -1.0),
+        ImageHandle::RightCenter => (1.0, 0.0),
+        ImageHandle::LeftCenter => (-1.0, 0.0),
+        ImageHandle::TopCenter => (0.0, 1.0),
+        ImageHandle::BottomCenter => (0.0, -1.0),
+    };
+    let (minimum_u, minimum_v) = (5.0 / a.hypot(b), 5.0 / c.hypot(d));
+    let (mut su, mut sv) = (1.0 + u * du, 1.0 + v * dv);
+    if proportional && u != 0.0 && v != 0.0 {
+        let scale = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
+        su = scale.max(minimum_u).max(minimum_v);
+        sv = su;
+    } else {
+        if u != 0.0 {
+            su = su.max(minimum_u);
+        }
+        if v != 0.0 {
+            sv = sv.max(minimum_v);
+        }
+    }
+    let local = Matrix([su, 0.0, 0.0, sv, if u < 0.0 { 1.0 - su } else { 0.0 }, if v < 0.0 { 1.0 - sv } else { 0.0 }]);
+    let resized = local.then(&frame);
+    resized.0.iter().all(|v| v.is_finite()).then_some(resized)
+}
 
 pub(crate) fn user_to_screen(xf: &PageXform, info: &DocInfo, page: usize, x: f64, y: f64) -> Pos2 {
     let Some(p) = info.pages.get(page) else { return Pos2::ZERO };
@@ -669,7 +721,12 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             if let Some(h) = handle_drag {
                 if let Some(s) = view.image_selection.as_mut() {
                     let o = origin.unwrap_or_else(|| obb.handle_pos(h));
-                    s.drag = Some(ImageDrag { start: o, target: DragTarget::Handle(h), initial_rect: b, initial_matrix: image.matrix });
+                    s.drag = Some(ImageDrag {
+                        start: o,
+                        target: DragTarget::Handle(h),
+                        initial_rect: b,
+                        initial_matrix: resize_frame(&obb, xf, info, page).0,
+                    });
                 }
             } else if rot_drag {
                 if let Some(s) = view.image_selection.as_mut() {
@@ -687,7 +744,12 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                     }
                 } else if let Some((h, _)) = obb.handles().iter().find(|(_, pos)| pos.distance(o) < 8.0) {
                     if let Some(s) = view.image_selection.as_mut() {
-                        s.drag = Some(ImageDrag { start: o, target: DragTarget::Handle(*h), initial_rect: b, initial_matrix: image.matrix });
+                        s.drag = Some(ImageDrag {
+                            start: o,
+                            target: DragTarget::Handle(*h),
+                            initial_rect: b,
+                            initial_matrix: resize_frame(&obb, xf, info, page).0,
+                        });
                     }
                 } else if (image_contains(i, o) || quad_contains(obb.corners(), o))
                     && let Some(s) = view.image_selection.as_mut()
@@ -805,11 +867,6 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             }
             let m_init = Matrix(drag.initial_matrix);
             let [a0, b0, c0, d0, e0, f0] = drag.initial_matrix;
-            let w0 = (a0 * a0 + b0 * b0).sqrt().max(1e-6);
-            let h0 = (c0 * c0 + d0 * d0).sqrt().max(1e-6);
-            let u_axis = (a0 / w0, b0 / w0);
-            let v_axis = (c0 / h0, d0 / h0);
-
             let (sx, sy) = screen_to_user(xf, info, page, drag.start);
             let (px, py) = screen_to_user(xf, info, page, p);
 
@@ -819,46 +876,9 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                     (Matrix([a0, b0, c0, d0, e0 + dx, f0 + dy]), egui::CursorIcon::Move)
                 }
                 DragTarget::Handle(handle) => {
-                    let p00 = (e0, f0);
-                    let p10 = (e0 + a0, f0 + b0);
-                    let p11 = (e0 + a0 + c0, f0 + b0 + d0);
-                    let p01 = (e0 + c0, f0 + d0);
-                    let p_curr = (px, py);
-
-                    // Signs point from the fixed opposite edge/corner toward the dragged grip.
-                    let (u, v) = match handle {
-                        ImageHandle::TopRight => (1.0, 1.0),
-                        ImageHandle::TopLeft => (-1.0, 1.0),
-                        ImageHandle::BottomLeft => (-1.0, -1.0),
-                        ImageHandle::BottomRight => (1.0, -1.0),
-                        ImageHandle::RightCenter => (1.0, 0.0),
-                        ImageHandle::LeftCenter => (-1.0, 0.0),
-                        ImageHandle::TopCenter => (0.0, 1.0),
-                        ImageHandle::BottomCenter => (0.0, -1.0),
-                    };
-                    let anchor = match (u < 0.0, v < 0.0) {
-                        (false, false) => p00,
-                        (true, false) => p10,
-                        (true, true) => p11,
-                        (false, true) => p01,
-                    };
-                    let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                    let du = (d.0 * u_axis.0 + d.1 * u_axis.1) * u;
-                    let dv = (d.0 * v_axis.0 + d.1 * v_axis.1) * v;
-                    let (new_w, new_h) = if u != 0.0 && v != 0.0 {
-                        let (su, sv) = (du / w0, dv / h0);
-                        let scale = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
-                        let scale = scale.max(5.0 / w0).max(5.0 / h0);
-                        (w0 * scale, h0 * scale)
-                    } else {
-                        (if u == 0.0 { w0 } else { du.max(5.0) }, if v == 0.0 { h0 } else { dv.max(5.0) })
-                    };
-                    let offset_u = if u < 0.0 { new_w } else { 0.0 };
-                    let offset_v = if v < 0.0 { new_h } else { 0.0 };
-                    let p00_new = (anchor.0 - offset_u * u_axis.0 - offset_v * v_axis.0, anchor.1 - offset_u * u_axis.1 - offset_v * v_axis.1);
-                    let icon = obb.handle_cursor(handle);
-                    let mat = Matrix([new_w * u_axis.0, new_w * u_axis.1, new_h * v_axis.0, new_h * v_axis.1, p00_new.0, p00_new.1]);
-                    (mat, icon)
+                    let proportional = !ui.input(|input| input.modifiers.shift);
+                    let resized = resize_affine_frame(m_init, handle, (px - sx, py - sy), proportional).unwrap_or(m_init);
+                    (resized, obb.handle_cursor(handle))
                 }
                 // Turning is handled above.
                 DragTarget::Rotate => (m_init, egui::CursorIcon::Default),
@@ -1088,6 +1108,17 @@ fn flip_user_axis(horizontal: bool, rotation: u16) -> bool {
 #[cfg(test)]
 mod screen_orientation_tests {
     use super::*;
+
+    #[test]
+    fn affine_resize_rejects_degenerate_or_nonfinite_frames() {
+        for frame in [[1.0, 1.0, 1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0 + 1e-13, 0.0, 0.0], [f64::INFINITY, 0.0, 0.0, 1.0, 0.0, 0.0]] {
+            assert!(resize_affine_frame(Matrix(frame), ImageHandle::TopRight, (1.0, 1.0), true).is_none(), "{frame:?}");
+        }
+        let frame = Matrix([100.0, 0.0, 50.0, 100.0, 100.0, 100.0]);
+        assert!(resize_affine_frame(frame, ImageHandle::TopRight, (10.0, 10.0), true).is_some());
+        assert!(resize_affine_frame(frame, ImageHandle::TopRight, (f64::NAN, 0.0), true).is_none());
+        assert!(resize_affine_frame(frame, ImageHandle::TopRight, (0.0, f64::INFINITY), true).is_none());
+    }
 
     #[test]
     fn flip_labels_follow_the_screen_axis() {
