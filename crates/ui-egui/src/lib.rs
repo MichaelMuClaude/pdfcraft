@@ -36,10 +36,9 @@ macro_rules! tl_ctx {
 }
 pub mod canvas;
 mod chrome;
-pub mod image_engine;
+mod image_engine;
 pub use combine_grid::ThumbState as CombineThumb;
 pub use combine_ui::{Columns as CombineColumns, CombineView, Lock as CombineLock, SortKey};
-pub use image_engine::{HandleId, MIN_RECT_SIZE, apply_crop, apply_resize, apply_resize_proportional, reset_crop};
 mod commands;
 pub mod control;
 mod menus;

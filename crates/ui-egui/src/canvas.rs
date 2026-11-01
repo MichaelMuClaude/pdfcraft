@@ -146,48 +146,12 @@ pub struct ImageObb {
     pub s_lc: Pos2,
     pub s_rot: Pos2,
     pub screen_center: Pos2,
-    pub width: f32,
-    pub height: f32,
-    pub theta: f32,
     pub u_axis: (f64, f64),
     pub v_axis: (f64, f64),
     pub is_rotated: bool,
 }
 
 impl ImageObb {
-    /// Calculates the 4 rotated corners manually using center, width, height, and rotation angle (θ).
-    /// Local axes: `u_axis = (cos θ, sin θ)` and `v_axis = (-sin θ, cos θ)`.
-    /// Places the 8 resize handles exactly at these rotated vertices and midpoints.
-    pub fn from_center_size_angle(center: Pos2, width: f32, height: f32, theta: f32) -> Self {
-        let cos_t = theta.cos();
-        let sin_t = theta.sin();
-        let u_axis = (cos_t as f64, sin_t as f64);
-        let v_axis = (-sin_t as f64, cos_t as f64);
-        let u_vec = vec2(cos_t, sin_t);
-        let v_vec = vec2(-sin_t, cos_t);
-        let hw = width * 0.5;
-        let hh = height * 0.5;
-
-        let s00 = center - u_vec * hw - v_vec * hh;
-        let s10 = center + u_vec * hw - v_vec * hh;
-        let s11 = center + u_vec * hw + v_vec * hh;
-        let s01 = center - u_vec * hw + v_vec * hh;
-
-        let s_bc = center - v_vec * hh;
-        let s_rc = center + u_vec * hw;
-        let s_tc = center + v_vec * hh;
-        let s_lc = center - u_vec * hw;
-
-        let s_rot = s_tc + v_vec * 24.0;
-        let is_rotated = theta.abs() > 1e-4;
-
-        Self { s00, s10, s11, s01, s_bc, s_rc, s_tc, s_lc, s_rot, screen_center: center, width, height, theta, u_axis, v_axis, is_rotated }
-    }
-
-    pub fn new(matrix: [f64; 6], xf: &PageXform, info: &DocInfo, page: usize) -> Self {
-        Self::from_matrix(matrix, xf, info, page)
-    }
-
     pub fn from_matrix(matrix: [f64; 6], xf: &PageXform, info: &DocInfo, page: usize) -> Self {
         let m = crate::edit_text_ui::Matrix(matrix);
         let p00 = m.apply(0.0, 0.0);
@@ -216,7 +180,6 @@ impl ImageObb {
         let h_v = (c * c + d * d).sqrt().max(1e-6);
         let u_axis = (a / w_u, b / w_u);
         let v_axis = (c / h_v, d / h_v);
-        let theta = (b).atan2(a) as f32;
         let is_rotated = b.abs() > 1e-4 || c.abs() > 1e-4;
 
         Self {
@@ -230,9 +193,6 @@ impl ImageObb {
             s_lc,
             s_rot,
             screen_center,
-            width: (s10 - s00).length(),
-            height: (s01 - s00).length(),
-            theta,
             u_axis,
             v_axis,
             is_rotated,
@@ -253,15 +213,16 @@ impl ImageObb {
 
     pub fn handles(&self) -> [(ImageHandle, Pos2); 8] {
         [
-            (ImageHandle::TopLeft, self.s01),
-            (ImageHandle::TopCenter, self.s_tc),
-            (ImageHandle::TopRight, self.s11),
-            (ImageHandle::RightCenter, self.s_rc),
-            (ImageHandle::BottomRight, self.s10),
-            (ImageHandle::BottomCenter, self.s_bc),
-            (ImageHandle::BottomLeft, self.s00),
-            (ImageHandle::LeftCenter, self.s_lc),
+            ImageHandle::TopLeft,
+            ImageHandle::TopCenter,
+            ImageHandle::TopRight,
+            ImageHandle::RightCenter,
+            ImageHandle::BottomRight,
+            ImageHandle::BottomCenter,
+            ImageHandle::BottomLeft,
+            ImageHandle::LeftCenter,
         ]
+        .map(|h| (h, self.handle_pos(h)))
     }
 
     pub fn handle_pos(&self, handle: ImageHandle) -> Pos2 {
@@ -277,127 +238,9 @@ impl ImageObb {
         }
     }
 
-    pub fn handle_id(&self, base_id: egui::Id, handle: ImageHandle) -> egui::Id {
-        base_id.with(match handle {
-            ImageHandle::TopLeft => "handle_tl",
-            ImageHandle::TopCenter => "handle_tc",
-            ImageHandle::TopRight => "handle_tr",
-            ImageHandle::RightCenter => "handle_rc",
-            ImageHandle::BottomRight => "handle_br",
-            ImageHandle::BottomCenter => "handle_bc",
-            ImageHandle::BottomLeft => "handle_bl",
-            ImageHandle::LeftCenter => "handle_lc",
-        })
-    }
-
-    pub fn handles_with_ids(&self, base_id: egui::Id) -> [(ImageHandle, Pos2, egui::Id); 8] {
-        [
-            (ImageHandle::TopLeft, self.s01, self.handle_id(base_id, ImageHandle::TopLeft)),
-            (ImageHandle::TopCenter, self.s_tc, self.handle_id(base_id, ImageHandle::TopCenter)),
-            (ImageHandle::TopRight, self.s11, self.handle_id(base_id, ImageHandle::TopRight)),
-            (ImageHandle::RightCenter, self.s_rc, self.handle_id(base_id, ImageHandle::RightCenter)),
-            (ImageHandle::BottomRight, self.s10, self.handle_id(base_id, ImageHandle::BottomRight)),
-            (ImageHandle::BottomCenter, self.s_bc, self.handle_id(base_id, ImageHandle::BottomCenter)),
-            (ImageHandle::BottomLeft, self.s00, self.handle_id(base_id, ImageHandle::BottomLeft)),
-            (ImageHandle::LeftCenter, self.s_lc, self.handle_id(base_id, ImageHandle::LeftCenter)),
-        ]
-    }
-
     pub fn corners(&self) -> [Pos2; 4] {
         [self.s00, self.s10, self.s11, self.s01]
     }
-
-    /// Resizes the OBB proportionally along its local axes using projected mouse delta,
-    /// locking the diagonally opposite corner as the fixed anchor point.
-    pub fn scale_proportional(&self, handle: ImageHandle, delta: Vec2, min_size: f32) -> Self {
-        let u_diff = self.s10 - self.s00;
-        let v_diff = self.s01 - self.s00;
-        let u_len = u_diff.length();
-        let v_len = v_diff.length();
-        let u_vec = if u_len > 1e-4 { u_diff / u_len } else { vec2(1.0, 0.0) };
-        let v_vec = if v_len > 1e-4 { v_diff / v_len } else { vec2(0.0, 1.0) };
-        let delta_u = delta.dot(u_vec);
-        let delta_v = delta.dot(v_vec);
-        let min_s = min_size.max(5.0);
-
-        match handle {
-            ImageHandle::TopRight => {
-                let anchor = self.s00;
-                let s_u = (self.width + delta_u) / self.width.max(1e-4);
-                let s_v = (self.height + delta_v) / self.height.max(1e-4);
-                let s = if (s_u - 1.0).abs() >= (s_v - 1.0).abs() { s_u } else { s_v };
-                let s = s.max(min_s / self.width.max(1e-4)).max(min_s / self.height.max(1e-4));
-                let nw = self.width * s;
-                let nh = self.height * s;
-                let new_center = anchor + u_vec * (nw * 0.5) + v_vec * (nh * 0.5);
-                Self::from_center_size_angle(new_center, nw, nh, self.theta)
-            }
-            ImageHandle::TopLeft => {
-                let anchor = self.s10;
-                let s_u = (self.width - delta_u) / self.width.max(1e-4);
-                let s_v = (self.height + delta_v) / self.height.max(1e-4);
-                let s = if (s_u - 1.0).abs() >= (s_v - 1.0).abs() { s_u } else { s_v };
-                let s = s.max(min_s / self.width.max(1e-4)).max(min_s / self.height.max(1e-4));
-                let nw = self.width * s;
-                let nh = self.height * s;
-                let new_center = anchor - u_vec * (nw * 0.5) + v_vec * (nh * 0.5);
-                Self::from_center_size_angle(new_center, nw, nh, self.theta)
-            }
-            ImageHandle::BottomLeft => {
-                let anchor = self.s11;
-                let s_u = (self.width - delta_u) / self.width.max(1e-4);
-                let s_v = (self.height - delta_v) / self.height.max(1e-4);
-                let s = if (s_u - 1.0).abs() >= (s_v - 1.0).abs() { s_u } else { s_v };
-                let s = s.max(min_s / self.width.max(1e-4)).max(min_s / self.height.max(1e-4));
-                let nw = self.width * s;
-                let nh = self.height * s;
-                let new_center = anchor - u_vec * (nw * 0.5) - v_vec * (nh * 0.5);
-                Self::from_center_size_angle(new_center, nw, nh, self.theta)
-            }
-            ImageHandle::BottomRight => {
-                let anchor = self.s01;
-                let s_u = (self.width + delta_u) / self.width.max(1e-4);
-                let s_v = (self.height - delta_v) / self.height.max(1e-4);
-                let s = if (s_u - 1.0).abs() >= (s_v - 1.0).abs() { s_u } else { s_v };
-                let s = s.max(min_s / self.width.max(1e-4)).max(min_s / self.height.max(1e-4));
-                let nw = self.width * s;
-                let nh = self.height * s;
-                let new_center = anchor + u_vec * (nw * 0.5) - v_vec * (nh * 0.5);
-                Self::from_center_size_angle(new_center, nw, nh, self.theta)
-            }
-            ImageHandle::RightCenter => {
-                let anchor = self.s_lc;
-                let nw = (self.width + delta_u).max(min_s);
-                let new_center = anchor + u_vec * (nw * 0.5);
-                Self::from_center_size_angle(new_center, nw, self.height, self.theta)
-            }
-            ImageHandle::LeftCenter => {
-                let anchor = self.s_rc;
-                let nw = (self.width - delta_u).max(min_s);
-                let new_center = anchor - u_vec * (nw * 0.5);
-                Self::from_center_size_angle(new_center, nw, self.height, self.theta)
-            }
-            ImageHandle::TopCenter => {
-                let anchor = self.s_bc;
-                let nh = (self.height + delta_v).max(min_s);
-                let new_center = anchor + v_vec * (nh * 0.5);
-                Self::from_center_size_angle(new_center, self.width, nh, self.theta)
-            }
-            ImageHandle::BottomCenter => {
-                let anchor = self.s_tc;
-                let nh = (self.height - delta_v).max(min_s);
-                let new_center = anchor - v_vec * (nh * 0.5);
-                Self::from_center_size_angle(new_center, self.width, nh, self.theta)
-            }
-        }
-    }
-}
-
-/// Projects mouse delta onto local unit axes `u_axis` and `v_axis` using the dot product.
-pub fn project_delta(delta: Vec2, u_axis: (f64, f64), v_axis: (f64, f64)) -> (f64, f64) {
-    let dx = delta.x as f64;
-    let dy = delta.y as f64;
-    (dx * u_axis.0 + dy * u_axis.1, dx * v_axis.0 + dy * v_axis.1)
 }
 
 /// The page display as it was before full screen, put back on leaving it
@@ -4245,6 +4088,5 @@ enum FieldMenu {
     Duplicate(String),
 }
 
-pub use crate::image_engine::{HandleId, MIN_RECT_SIZE, apply_crop, apply_resize, apply_resize_proportional, reset_crop};
 #[cfg(test)]
 mod tests;

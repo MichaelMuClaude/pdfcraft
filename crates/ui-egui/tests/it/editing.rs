@@ -7715,59 +7715,6 @@ fn rotated_image_selection_and_crop() {
     assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_none()), "crop mode ended");
 }
 
-#[test]
-fn test_image_rotated_45_deg_obb_and_proportional_scale() {
-    use pdfcraft_ui_egui::ImageHandle;
-    use pdfcraft_ui_egui::canvas::ImageObb;
-    use std::f32::consts::FRAC_PI_4;
-
-    let center = egui::pos2(200.0, 200.0);
-    let width = 100.0_f32;
-    let height = 50.0_f32;
-    let theta = FRAC_PI_4;
-
-    let obb = ImageObb::from_center_size_angle(center, width, height, theta);
-
-    // 1. Verify it outputs an OBB (not an AABB):
-    assert!(obb.is_rotated);
-    let corners = obb.corners();
-    assert!((corners[0].x - corners[1].x).abs() > 1.0);
-    assert!((corners[0].y - corners[1].y).abs() > 1.0);
-    assert!((corners[1].x - corners[2].x).abs() > 1.0);
-    assert!((corners[1].y - corners[2].y).abs() > 1.0);
-
-    let edge_u = (corners[1] - corners[0]).length();
-    let edge_v = (corners[3] - corners[0]).length();
-    assert!((edge_u - width).abs() < 1e-4, "edge_u={edge_u}, width={width}");
-    assert!((edge_v - height).abs() < 1e-4, "edge_v={edge_v}, height={height}");
-
-    let dot = (corners[1] - corners[0]).dot(corners[3] - corners[0]);
-    assert!(dot.abs() < 1e-4, "adjacent edges must be perpendicular for OBB");
-
-    let handles = obb.handles();
-    assert_eq!(handles.len(), 8);
-
-    // 2. Drag TopRight handle with a pointer delta along local axes:
-    let delta = egui::vec2(10.0 * theta.cos(), 10.0 * theta.sin());
-    let anchor_before = obb.s00;
-
-    let scaled_obb = obb.scale_proportional(ImageHandle::TopRight, delta, 5.0);
-
-    // The diagonally opposite corner (s00) MUST remain locked as the fixed anchor point:
-    assert!((scaled_obb.s00.x - anchor_before.x).abs() < 1e-4);
-    assert!((scaled_obb.s00.y - anchor_before.y).abs() < 1e-4);
-
-    // Dimensions scale proportionally along local axes (aspect ratio preserved):
-    let new_aspect = scaled_obb.width / scaled_obb.height;
-    let old_aspect = width / height;
-    assert!((new_aspect - old_aspect).abs() < 1e-4, "aspect ratio preserved: {new_aspect} vs {old_aspect}");
-    assert!(scaled_obb.width > width, "width increased");
-    assert!(scaled_obb.height > height, "height increased proportionally");
-
-    // Rotation angle is preserved without skewing:
-    assert!((scaled_obb.theta - theta).abs() < 1e-4);
-}
-
 trait RectExt {
     fn width(&self) -> f64;
 }

@@ -1,6 +1,6 @@
 use super::{ACCENT, Color32, CornerRadius, DocInfo, DocView, Edit, MAX_OUTLINES, PagePointer, PageXform, Pos2, Rect, Stroke, pos2, user_box};
 use crate::canvas::{ImageObb, PainterExt};
-use crate::image_engine::{CROP_ACCENT, HandleId, apply_crop, apply_resize, apply_resize_proportional, draw_handle, draw_rule_of_thirds};
+use crate::image_engine::{CROP_ACCENT, apply_crop, apply_resize, apply_resize_proportional, draw_handle, draw_rule_of_thirds};
 use crate::page_cursor::Layer;
 use crate::page_router::{Hit, Owner, PicturePart};
 
@@ -17,7 +17,7 @@ pub(crate) struct ImageCx<'a> {
 }
 
 /// The 8 resize handles on an image (4 corners + 4 edge centers).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ImageHandle {
     TopLeft,
     TopCenter,
@@ -29,11 +29,35 @@ pub enum ImageHandle {
     LeftCenter,
 }
 
+impl ImageHandle {
+    /// The resize cursor for this handle on an upright box.
+    pub(crate) fn cursor_icon(self) -> egui::CursorIcon {
+        match self {
+            ImageHandle::TopLeft | ImageHandle::BottomRight => egui::CursorIcon::ResizeNwSe,
+            ImageHandle::TopRight | ImageHandle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+            ImageHandle::TopCenter | ImageHandle::BottomCenter => egui::CursorIcon::ResizeVertical,
+            ImageHandle::LeftCenter | ImageHandle::RightCenter => egui::CursorIcon::ResizeHorizontal,
+        }
+    }
+}
+
+/// The handles in the order [`crop_handles`] places them: corners, then the top, right, bottom
+/// and left edge midpoints.
+const GRIPS: [ImageHandle; 8] = [
+    ImageHandle::TopLeft,
+    ImageHandle::TopRight,
+    ImageHandle::BottomLeft,
+    ImageHandle::BottomRight,
+    ImageHandle::TopCenter,
+    ImageHandle::RightCenter,
+    ImageHandle::BottomCenter,
+    ImageHandle::LeftCenter,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragTarget {
     Move,
     Handle(ImageHandle),
-    CropHandle(ImageHandle),
     Rotate,
 }
 
@@ -196,17 +220,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     {
         let d = p - start;
         let k0 = keep_screen(at_start);
-        if grip < 8 {
-            let handle_id = match grip {
-                0 => HandleId::TopLeft,
-                1 => HandleId::TopRight,
-                2 => HandleId::BottomLeft,
-                3 => HandleId::BottomRight,
-                4 => HandleId::TopMid,
-                5 => HandleId::RightMid,
-                6 => HandleId::BottomMid,
-                _ => HandleId::LeftMid,
-            };
+        if let Some(&handle) = GRIPS.get(grip) {
             let uv0 = if b.width() > 0.0 && b.height() > 0.0 {
                 Rect::from_min_max(
                     pos2(((k0.min.x - b.min.x) / b.width()).clamp(0.0, 1.0), ((k0.min.y - b.min.y) / b.height()).clamp(0.0, 1.0)),
@@ -215,7 +229,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
             } else {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
             };
-            let (new_screen, _) = apply_crop(k0, uv0, handle_id, d);
+            let (new_screen, _) = apply_crop(k0, uv0, handle, d);
             let (min_w, min_h) = (6.0_f32.min(b.width()), 6.0_f32.min(b.height()));
             let clamped = Rect::from_min_max(
                 pos2(new_screen.min.x.clamp(b.min.x, b.max.x - min_w), new_screen.min.y.clamp(b.min.y, b.max.y - min_h)),
@@ -353,17 +367,8 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
             || reset.is_some_and(|r| r.contains(p))
         {
             egui::CursorIcon::PointingHand
-        } else if let Some(g) = crop_handles(k).iter().position(|h| h.distance(p) < 8.0) {
-            match g {
-                0 => HandleId::TopLeft.cursor_icon(),
-                1 => HandleId::TopRight.cursor_icon(),
-                2 => HandleId::BottomLeft.cursor_icon(),
-                3 => HandleId::BottomRight.cursor_icon(),
-                4 => HandleId::TopMid.cursor_icon(),
-                5 => HandleId::RightMid.cursor_icon(),
-                6 => HandleId::BottomMid.cursor_icon(),
-                _ => HandleId::LeftMid.cursor_icon(),
-            }
+        } else if let Some(&g) = crop_handles(k).iter().position(|h| h.distance(p) < 8.0).and_then(|g| GRIPS.get(g)) {
+            g.cursor_icon()
         } else if k.contains(p) {
             if mode.drag.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab }
         } else {
@@ -433,22 +438,6 @@ fn stretched_picture(painter: &egui::Painter, xf: &PageXform, tex: egui::Texture
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     clipped.add(egui::Shape::mesh(mesh));
-}
-
-/// Once a selected corner or the rotate knob is grabbed, text under it cannot take over the gesture. The same
-/// applies after the pointer leaves the image/page while dragging.
-#[allow(dead_code)]
-pub(crate) fn image_owns_pointer(_ui: &egui::Ui, xf: &PageXform, ptr: &PagePointer, page: usize, info: &DocInfo, view: &DocView) -> bool {
-    let Some(selection) = view.image_selection.as_ref().filter(|s| s.page == page) else { return false };
-    if selection.drag.is_some() || selection.crop.is_some() || selection.crop_mode {
-        return true;
-    }
-    let Some(image) = view.edit_images.get(&page).and_then(|(_, images)| images.get(selection.index)) else { return false };
-    let obb = ImageObb::from_image(image, xf, info, page);
-    let p = if ptr.primary_down { ptr.origin.or(ptr.pos) } else { ptr.pos };
-    let Some(p) = p else { return false };
-
-    obb.handles().iter().any(|(_, h)| h.distance(p) < 8.0) || obb.s_rot.distance(p) < 8.0
 }
 
 /// The selected picture's grips under `p`: its corners and its rotate knob. They are asked after
@@ -542,7 +531,7 @@ pub(super) fn turn_degrees_delta(centre: Pos2, start: Pos2, pointer: Pos2, snap:
 
 /// Degrees clockwise (-180..=180) that turn "straight up" from `centre` onto the pointer; `snap`
 /// rounds to steps of 15 degrees (Shift). A pointer on the centre turns nothing.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(super) fn turn_degrees(centre: Pos2, pointer: Pos2, snap: bool) -> f32 {
     turn_degrees_delta(centre, centre - egui::vec2(0.0, 10.0), pointer, snap)
 }
@@ -673,9 +662,9 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
         }
 
         let mut handle_drag = None;
-        for (h, h_pos, handle_id) in obb.handles_with_ids(ui.scope_id().with("img_handle")) {
+        for (h, h_pos) in obb.handles() {
             let handle_rect = Rect::from_center_size(h_pos, egui::vec2(18.0, 18.0));
-            let handle_resp = ui.interact(handle_rect, handle_id, egui::Sense::drag());
+            let handle_resp = ui.interact(handle_rect, ui.scope_id().with("img_handle").with(h), egui::Sense::drag());
             if allow_interaction && handle_resp.drag_started() {
                 handle_drag = Some(h);
             }
@@ -795,14 +784,14 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             if !obb.is_rotated && !matches!(drag.target, DragTarget::Rotate) {
                 let preview = match drag.target {
                     DragTarget::Handle(handle) => {
-                        let handle_id = HandleId::from(handle);
                         let delta = p - drag.start;
-                        let is_corner = matches!(handle_id, HandleId::TopLeft | HandleId::TopRight | HandleId::BottomLeft | HandleId::BottomRight);
+                        let is_corner =
+                            matches!(handle, ImageHandle::TopLeft | ImageHandle::TopRight | ImageHandle::BottomLeft | ImageHandle::BottomRight);
                         let shift = ui.input(|inp| inp.modifiers.shift);
                         if is_corner && !shift {
-                            apply_resize_proportional(drag.initial_rect, handle_id, delta)
+                            apply_resize_proportional(drag.initial_rect, handle, delta)
                         } else {
-                            apply_resize(drag.initial_rect, handle_id, delta)
+                            apply_resize(drag.initial_rect, handle, delta)
                         }
                     }
                     DragTarget::Move => drag.initial_rect.translate(p - drag.start),
@@ -857,7 +846,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                 }
 
                 let icon = match drag.target {
-                    DragTarget::Handle(handle) => HandleId::from(handle).cursor_icon(),
+                    DragTarget::Handle(handle) => handle.cursor_icon(),
                     DragTarget::Move => egui::CursorIcon::Grabbing,
                     _ => egui::CursorIcon::Move,
                 };
@@ -992,10 +981,9 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                     let mat = Matrix([new_w * u_axis.0, new_w * u_axis.1, new_h * v_axis.0, new_h * v_axis.1, p00_new.0, p00_new.1]);
                     (mat, icon)
                 }
-                _ => (m_init, egui::CursorIcon::Default),
             };
 
-            let preview_obb = ImageObb::new(m_new.0, xf, info, page);
+            let preview_obb = ImageObb::from_matrix(m_new.0, xf, info, page);
             if let Some(tex) = view.page_raster(page) {
                 let clipped = painter.with_clip_rect(painter.clip_rect().intersect(xf.rect));
                 let mut mesh = egui::Mesh::with_texture(tex);
