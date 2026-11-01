@@ -32,18 +32,22 @@ pub fn installed_directories() -> Vec<PathBuf> {
     }
 }
 
-/// Bounded, symlink-free scan. Only standalone, openly licensed, embeddable faces are listed.
+/// Bounded scan with resolved roots and no descendant symlinks.
+/// Only standalone, openly licensed, embeddable faces are listed.
 /// The caller controls roots (automation resolves confinement before calling this).
 pub fn discover(roots: &[PathBuf]) -> Vec<FontFile> {
     discover_budgeted(roots, 64u64 << 20)
 }
 
-/// Bounded, symlink-free scan. `budget` caps the total size of the fonts listed: a file that
-/// is rejected (unreadable, not openly licensed, a duplicate) does not spend it. Every file read
+/// Bounded scan with resolved roots and no descendant symlinks. `budget` caps the total
+/// size of the fonts listed: a rejected file (unreadable, not openly licensed, a duplicate)
+/// does not spend it. Every file read
 /// counts against four times the budget, so a folder of unusable fonts cannot stall the scan.
 pub fn discover_budgeted(roots: &[PathBuf], mut budget: u64) -> Vec<FontFile> {
     use std::io::Read;
-    let mut pending: Vec<_> = roots.iter().take(16).map(|r| (r.clone(), 0usize)).collect();
+    // User font directories themselves are often links. Resolve only the explicitly
+    // supplied roots; links found below them must not escape an automation read root.
+    let mut pending: Vec<_> = roots.iter().take(16).filter_map(|r| r.canonicalize().ok()).map(|r| (r, 0usize)).collect();
     let mut files = Vec::new();
     let mut entries = 0usize;
     let mut read_allowance = budget.saturating_mul(4);
@@ -89,7 +93,6 @@ pub fn discover_budgeted(roots: &[PathBuf], mut budget: u64) -> Vec<FontFile> {
         }
     }
     files.sort_by(|a, b| a.face.cmp(&b.face).then(a.path.cmp(&b.path)));
-    files.truncate(500);
     files
 }
 
@@ -106,6 +109,44 @@ fn font_extension(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_font_root_is_scanned_but_descendant_links_are_not() {
+        let root = std::env::temp_dir().join(format!("pdfcraft-font-links-{}", std::process::id()));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/Inter-Regular.ttf");
+        std::fs::copy(&source, real.join("regular.ttf")).unwrap();
+        let link = root.join("linked");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(&real, real.join("cycle")).unwrap();
+        std::os::unix::fs::symlink(source.with_file_name("Inter-Medium.ttf"), real.join("escape.ttf")).unwrap();
+        let found = discover(&[link]);
+        let expected = real.canonicalize().unwrap().join("regular.ttf");
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found.first().unwrap().face, "Inter-Regular");
+        assert_eq!(found.first().unwrap().path, expected);
+    }
+
+    #[test]
+    fn discovery_keeps_all_valid_faces_within_its_scan_budget() {
+        let root = std::env::temp_dir().join(format!("pdfcraft-font-count-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/Inter-Regular.ttf");
+        let bytes = std::fs::read(source).unwrap();
+        for id in 0..501u32 {
+            let mut font = bytes.clone();
+            // Valid standalone fonts with distinct bytes: an unreferenced trailer
+            // does not change their tables or embedding licence.
+            font.extend_from_slice(&id.to_le_bytes());
+            std::fs::write(root.join(format!("font-{id:03}.ttf")), font).unwrap();
+        }
+        let found = discover_budgeted(std::slice::from_ref(&root), (bytes.len() as u64 + 4) * 501);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found.len(), 501, "do not silently discard accepted fonts after sorting");
+    }
 
     #[test]
     fn test_installed_directories() {

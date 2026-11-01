@@ -159,7 +159,8 @@ pub(crate) fn panel(
                 #[cfg(not(target_arch = "wasm32"))]
                 ui.menu_button(tl!("Installed fonts…"), |ui| {
                     ui.set_min_width(260.0);
-                    match crate::files::installed_font_files(ui.ctx()) {
+                    let reload = ui.button(tl!("Reload")).clicked();
+                    match crate::files::installed_font_files(ui.ctx(), reload) {
                         Some(list) if list.is_empty() => {
                             ui.label(tl!("No openly licensed document fonts found. Load a font file."));
                         }
