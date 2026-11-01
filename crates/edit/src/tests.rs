@@ -9789,10 +9789,10 @@ fn different_inline_soft_masks_have_distinct_identities() {
     dict2.set(b"SMask".to_vec(), Object::Dict(mask2));
 
     let mut state1 = images::EffectiveGState::default();
-    state1.merge_dict(&dict1, &doc, b"GS1");
+    state1.merge_dict(&dict1, &doc, pdfcraft_content::Matrix::IDENTITY);
 
     let mut state2 = images::EffectiveGState::default();
-    state2.merge_dict(&dict2, &doc, b"GS2");
+    state2.merge_dict(&dict2, &doc, pdfcraft_content::Matrix::IDENTITY);
 
     assert!(state1.visually_differs(&state2), "two different inline soft masks must visually differ");
 }
@@ -10168,4 +10168,90 @@ fn editor_crop_group_move_keeps_an_outer_author_clip_fixed() {
     let bytes = page_content_bytes(&doc, 0);
     assert!(String::from_utf8_lossy(&bytes).starts_with("0 0 220 300 re W n"));
     assert_eq!(text::text_lines(&doc, 0).unwrap()[0].text, "Caption");
+}
+
+fn review_state_raster(doc: &Document) -> Vec<u8> {
+    let bytes = write_full(doc, &SaveOptions::default()).unwrap();
+    let mut renderer = pdfcraft_render::PageRenderer::new(Arc::new(bytes), Default::default());
+    renderer.render(pdfcraft_render::RenderRequest { page: 0, scale: 1.0, ..Default::default() }).rgba.to_vec()
+}
+
+fn review_shared_mask_page(states: &str, luminosity_b: bool, mask_paint: &str) -> Document {
+    let content = format!("q {states} q 100 0 0 100 20 20 cm /Im0 Do Q Q q 0 0 1 rg 200 200 5 5 re f Q");
+    let stream = format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len());
+    let subtype = if luminosity_b { "Luminosity" } else { "Alpha" };
+    let mask_b = format!("<< /Type /ExtGState /SMask << /S /{subtype} /G 8 0 R >> >>");
+    let group = format!(
+        "<< /Type /XObject /Subtype /Form /BBox [0 0 300 300] /Group << /S /Transparency /I true /CS /DeviceGray >> /Length {} >>\nstream\n{mask_paint}\nendstream",
+        mask_paint.len()
+    );
+    build(&[
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> /ExtGState << /A 6 0 R /B 7 0 R >> >> >>",
+        &stream,
+        "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 4 >>\nstream\n\0\0\0\0\nendstream",
+        "<< /Type /ExtGState /SMask << /S /Alpha /G 8 0 R >> >>",
+        &mask_b,
+        &group,
+    ])
+}
+
+#[test]
+fn review_repeated_gs_keeps_alpha_vs_luminosity_mask_chronology() {
+    for states in ["/A gs", "/A gs /B gs", "/A gs /B gs /A gs"] {
+        let mut doc = review_shared_mask_page(states, true, "0.25 g 0 0 300 300 re f");
+        let before = review_state_raster(&reopen(&doc));
+        assert!(before.as_chunks::<4>().0.iter().any(|p| p[0] == p[1] && p[1] == p[2] && p[0] < 230), "the masked image is visible");
+        arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+        assert_eq!(review_state_raster(&reopen(&doc)), before, "mask application order must survive: {states}");
+    }
+}
+
+#[test]
+fn review_repeated_gs_keeps_last_mask_establishment_ctm() {
+    for states in [
+        "1 0 0 1 50 0 cm /A gs 1 0 0 1 -50 0 cm",
+        "/A gs 1 0 0 1 50 0 cm /B gs 1 0 0 1 -50 0 cm",
+        "/A gs 1 0 0 1 50 0 cm /B gs 1 0 0 1 -50 0 cm /A gs",
+    ] {
+        let mut doc = review_shared_mask_page(states, false, "0.25 g 0 0 60 300 re f");
+        let before = review_state_raster(&reopen(&doc));
+        arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+        assert_eq!(review_state_raster(&reopen(&doc)), before, "mask CTM must survive: {states}");
+    }
+}
+
+#[test]
+fn review_soft_masks_sharing_a_group_keep_distinct_configurations() {
+    let doc = Document::new_empty();
+    let mask = |subtype: &str| {
+        Dict::from_iter([(
+            b"SMask".to_vec(),
+            Object::Dict(Dict::from_iter([(b"S".to_vec(), Object::name(subtype)), (b"G".to_vec(), Object::Ref(pdfcraft_cos::ObjRef::new(8, 0)))])),
+        )])
+    };
+    let mut alpha = images::EffectiveGState::default();
+    let mut luminosity = images::EffectiveGState::default();
+    alpha.merge_dict(&mask("Alpha"), &doc, pdfcraft_content::Matrix::IDENTITY);
+    luminosity.merge_dict(&mask("Luminosity"), &doc, pdfcraft_content::Matrix::IDENTITY);
+    assert!(alpha.visually_differs(&luminosity), "a shared group does not make Alpha and Luminosity the same mask");
+    for (key, value) in [
+        (b"BC".to_vec(), Object::Array(vec![Object::Real(0.5)])),
+        (
+            b"TR".to_vec(),
+            Object::Dict(Dict::from_iter([
+                (b"FunctionType".to_vec(), Object::Int(2)),
+                (b"Domain".to_vec(), Object::Array(vec![Object::Int(0), Object::Int(1)])),
+                (b"N".to_vec(), Object::Int(2)),
+            ])),
+        ),
+    ] {
+        let mut changed = mask("Luminosity");
+        let Object::Dict(definition) = changed.get_mut(b"SMask").unwrap() else { panic!("mask dictionary") };
+        definition.set(key, value);
+        let mut state = images::EffectiveGState::default();
+        state.merge_dict(&changed, &doc, pdfcraft_content::Matrix::IDENTITY);
+        assert!(state.visually_differs(&luminosity), "mask backdrop and transfer function belong to its definition");
+    }
 }

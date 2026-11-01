@@ -12,14 +12,18 @@ use crate::EditError;
 use crate::text::content_streams;
 
 /// The identity of a soft mask (`/SMask`) in the PDF graphics state.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MaskIdentity {
-    /// Indirect reference to a mask dictionary or stream.
-    Ref(u32, u16),
-    /// Indirect reference to the transparency group (`/G`) in a mask dictionary.
-    Group(u32, u16),
-    /// Explicit named mask or resource name.
-    Named(Vec<u8>),
+#[derive(Clone, Debug)]
+pub(crate) struct MaskIdentity {
+    // Share the owning ExtGState instead of copying an arbitrarily large inline mask on q/Q.
+    // Its complete SMask value retains S, TR, BC and every other mask parameter, not just G.
+    definition: Arc<Object>,
+    ctm: Matrix,
+}
+
+impl PartialEq for MaskIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.ctm == other.ctm && self.definition.as_dict().and_then(|d| d.get(b"SMask")) == other.definition.as_dict().and_then(|d| d.get(b"SMask"))
+    }
 }
 
 /// An image drawn on a page.
@@ -664,9 +668,13 @@ impl EffectiveGState {
             || self.print_params != other.print_params
     }
 
-    /// Merge the `gs_name` ExtGState `dict`. An inline soft mask with no group of its own is
-    /// known by the name of the ExtGState that sets it.
-    pub(crate) fn merge_dict(&mut self, dict: &Dict, doc: &Document, gs_name: &[u8]) {
+    #[cfg(test)]
+    pub(crate) fn merge_dict(&mut self, dict: &Dict, doc: &Document, ctm: Matrix) {
+        self.merge_shared(&Arc::new(Object::Dict(dict.clone())), doc, ctm);
+    }
+
+    fn merge_shared(&mut self, definition: &Arc<Object>, doc: &Document, ctm: Matrix) {
+        let Some(dict) = definition.as_dict() else { return };
         for key in [b"TR".as_slice(), b"TR2", b"OP", b"op", b"OPM", b"BG", b"BG2", b"UCR", b"UCR2", b"HT"] {
             if let Some(value) = dict.get(key) {
                 self.print_params.insert(key.to_vec(), std::rc::Rc::new(value.clone()));
@@ -691,26 +699,8 @@ impl EffectiveGState {
             }
         }
         if let Some(raw_smask) = dict.get(b"SMask") {
-            let resolved = doc.resolve(raw_smask);
-            if let Some(name) = resolved.as_name() {
-                if name == b"None" {
-                    self.smask = None;
-                } else {
-                    self.smask = Some(MaskIdentity::Named(name.to_vec()));
-                }
-            } else if let Some(mask_dict) = resolved.as_dict() {
-                if let Some(gr) = mask_dict.get(b"G").and_then(|g| g.as_ref()) {
-                    self.smask = Some(MaskIdentity::Group(gr.num, gr.generation));
-                } else if let Some(r) = raw_smask.as_ref() {
-                    self.smask = Some(MaskIdentity::Ref(r.num, r.generation));
-                } else if let Some(name) = mask_dict.get(b"Name").map(|n| doc.resolve(n)).and_then(|n| n.as_name().map(|s| s.to_vec())) {
-                    self.smask = Some(MaskIdentity::Named(name));
-                } else {
-                    self.smask = Some(MaskIdentity::Named(gs_name.to_vec()));
-                }
-            } else if let Some(r) = raw_smask.as_ref() {
-                self.smask = Some(MaskIdentity::Ref(r.num, r.generation));
-            }
+            let disabled = raw_smask.as_name() == Some(b"None") || raw_smask.as_ref().is_some_and(|r| doc.get(r).as_name() == Some(b"None"));
+            self.smask = (!disabled).then(|| MaskIdentity { definition: Arc::clone(definition), ctm });
         }
     }
 }
@@ -725,6 +715,7 @@ struct ExtendedGStateTracker {
     stack: Vec<(EffectiveGState, ActiveGsOps)>,
     current_state: EffectiveGState,
     active_gs_ops: ActiveGsOps,
+    definitions: std::collections::HashMap<Vec<u8>, Arc<Object>>,
 }
 
 impl ExtendedGStateTracker {
@@ -744,17 +735,22 @@ impl ExtendedGStateTracker {
                 }
             }
             b"gs" => {
-                let valid_gs = op
-                    .name(0)
-                    .and_then(|name| ext_gstates.get(name).map(|v| doc.resolve(v)).and_then(|v| v.as_dict().cloned()).map(|dict| (name, dict)));
-                if let Some((name, dict)) = valid_gs {
-                    self.current_state.merge_dict(&dict, doc, name);
+                let valid_gs = op.name(0).and_then(|name| {
+                    let definition = self.definitions.get(name).cloned().or_else(|| {
+                        let definition = doc.resolve(ext_gstates.get(name)?);
+                        definition.as_dict()?;
+                        self.definitions.insert(name.to_vec(), Arc::clone(&definition));
+                        Some(definition)
+                    })?;
+                    Some((name, definition))
+                });
+                if let Some((name, definition)) = valid_gs {
+                    self.current_state.merge_shared(&definition, doc, ctm);
                     let mut next = (*self.active_gs_ops).clone();
                     if let Some(pos) = next.iter().position(|(k, _, _)| k.as_slice() == name) {
-                        if let Some(entry) = next.get_mut(pos) {
-                            *entry = (name.to_vec(), op.clone(), ctm);
-                        }
-                    } else if next.len() < MAX_ACTIVE_GS_OPS {
+                        next.remove(pos);
+                    }
+                    if next.len() < MAX_ACTIVE_GS_OPS {
                         next.push((name.to_vec(), op.clone(), ctm));
                     }
                     self.active_gs_ops = std::rc::Rc::new(next);
@@ -1378,11 +1374,11 @@ fn arrange_image(
     }
 
     let mut reconstructed_state = dest_effective_state.clone();
-    for (op, _) in &source_gs_ops {
+    for (op, ctm) in &source_gs_ops {
         if let Some(name) = op.name(0)
-            && let Some(dict) = ext_gstates.get(name).map(|v| doc.resolve(v)).and_then(|v| v.as_dict().cloned())
+            && let Some(definition) = tracker.definitions.get(name)
         {
-            reconstructed_state.merge_dict(&dict, doc, name);
+            reconstructed_state.merge_shared(definition, doc, *ctm);
         }
     }
 
@@ -1979,5 +1975,19 @@ mod allocation_tests {
             tracker.step(op).unwrap();
         }
         assert_eq!(tracker.current, saved, "changing shared operands must preserve the saved state");
+    }
+
+    #[test]
+    fn review_soft_mask_identity_includes_establishment_matrix() {
+        let doc = Document::new_empty();
+        let mask = Dict::from_iter([(b"S".to_vec(), Object::name("Alpha")), (b"G".to_vec(), Object::Ref(ObjRef::new(8, 0)))]);
+        let definition = Dict::from_iter([(b"SMask".to_vec(), Object::Dict(mask))]);
+        let states = Dict::from_iter([(b"A".to_vec(), Object::Dict(definition))]);
+        let mut tracker = ExtendedGStateTracker::default();
+        let op = Op::new("gs", vec![Object::name("A")]);
+        tracker.step(&op, &states, &doc, Matrix::IDENTITY).unwrap();
+        let before = tracker.current_state.clone();
+        tracker.step(&op, &states, &doc, Matrix::translate(50.0, 0.0)).unwrap();
+        assert!(before.visually_differs(&tracker.current_state), "the same mask established under a different CTM is a different effective mask");
     }
 }
