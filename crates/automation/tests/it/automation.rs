@@ -3286,6 +3286,38 @@ fn editing_existing_text_through_tools() {
     assert_eq!(p["lines"].as_array().map(Vec::len), Some(2), "{p}");
 }
 
+/// Format text ▸ Superscript and Subscript without the GUI: a range, then back again over a space
+/// (which has no superscript form), each one undo step; refusals change nothing.
+#[test]
+fn superscript_and_subscript_through_tools() {
+    let dir = workdir("text-script");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
+    let paragraph = |a: &mut Automation| ok(a, "text_paragraphs", json!({ "doc": doc, "page": 2 }))["paragraphs"][0]["text"].as_str().unwrap().to_string();
+    let script = |script: &str, range: Value| json!({ "doc": doc, "page": 2, "paragraph": 1, "script": script, "range": range });
+    // "Page 2": the 2 is byte 5.
+    let r = ok(&mut a, "text_script", script("superscript", json!([5, 6])));
+    assert_eq!((r["script"].as_str(), r["paragraph"]["text"].as_str()), (Some("superscript"), Some("Page ²")), "{r}");
+    assert_eq!(page_text(&mut a, doc)[1], "Page ²");
+    // " ²": the space has no superscript form, and the range still toggles back.
+    ok(&mut a, "text_script", script("superscript", json!([4, 7])));
+    assert_eq!(paragraph(&mut a), "Page 2");
+    assert_eq!(ok(&mut a, "edit_undo", json!({ "doc": doc }))["undone"], "Edit text");
+    assert_eq!(paragraph(&mut a), "Page ²");
+    // Refused, changing nothing: a range that splits ², one past the end, an empty one, a range
+    // with nothing that has a subscript form, an unknown script.
+    for (name, range) in [
+        ("superscript", json!([5, 6])),
+        ("superscript", json!([0, 99])),
+        ("superscript", json!([3, 3])),
+        ("subscript", json!([4, 5])),
+        ("italic", json!([0, 1])),
+    ] {
+        assert!(matches!(a.call("text_script", &script(name, range.clone())), Err(ToolError::InvalidArgs(_))), "{name} {range}");
+    }
+    assert_eq!(paragraph(&mut a), "Page ²");
+}
+
 #[test]
 fn styled_cyrillic_fallback_is_batched_through_tools_and_reopen() {
     if pdfcraft_fonts::document_japanese_font().is_none() {

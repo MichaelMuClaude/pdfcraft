@@ -668,6 +668,7 @@ impl Automation {
                 }
                 out
             }
+            "text_script" => self.text_script(&a)?,
             "doc_audit_space" => {
                 let rows: Vec<Value> = self
                     .doc(&a)?
@@ -858,5 +859,53 @@ impl Automation {
             other => return Err(ToolError::UnknownTool(other.into())),
         };
         Ok(vec![Content::Json(out)])
+    }
+
+    /// `text_script`: Format text ▸ Superscript or Subscript on a paragraph, or on a byte range
+    /// of its editor text, written as `text_edit` writes the paragraph.
+    fn text_script(&mut self, a: &Args) -> Result<Value> {
+        use pdfcraft_engine::text_script::{Script, toggle};
+        let name = a.str("script")?;
+        let script = match name {
+            "superscript" => Script::Super,
+            "subscript" => Script::Sub,
+            other => return Err(ToolError::InvalidArgs(format!("unknown script {other:?} (superscript, subscript)"))),
+        };
+        let page = self.page(a)?;
+        let k = a.int("paragraph")?;
+        let text = {
+            let doc = self.doc(a)?;
+            let blocks = doc.text_blocks(page);
+            let index = self.paragraph_index(doc.id, page, k, &blocks)?;
+            blocks.get(index).map(|b| b.editor_text.clone()).ok_or_else(|| ToolError::InvalidArgs(format!("paragraph {k} is out of range")))?
+        };
+        let range = match a.opt_ints("range")? {
+            None => None,
+            Some(r) => {
+                let bounds = match r.as_slice() {
+                    [start, end] => usize::try_from(*start).ok().zip(usize::try_from(*end).ok()),
+                    _ => None,
+                };
+                let range = bounds.map(|(start, end)| start..end).filter(|r| {
+                    r.start < r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end)
+                });
+                let Some(range) = range else {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "range must be [start, end]: UTF-8 byte offsets of the paragraph's editor_text (from text_paragraphs) with start < end <= {}, on character boundaries",
+                        text.len()
+                    )));
+                };
+                Some(range)
+            }
+        };
+        let (toggled, _) = toggle(&text, range.as_ref(), script)
+            .ok_or_else(|| ToolError::InvalidArgs(format!("nothing to change: no character of the text has a {name} form")))?;
+        let args = json!({ "doc": a.get("doc"), "page": a.get("page"), "paragraph": k, "text": toggled });
+        let mut out = match self.call("text_edit", &args)?.into_iter().next() {
+            Some(Content::Json(out)) => out,
+            _ => json!({}),
+        };
+        out["script"] = json!(name);
+        Ok(out)
     }
 }

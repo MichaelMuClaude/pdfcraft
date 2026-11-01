@@ -1967,12 +1967,15 @@ tier = "P2"
 milestone = "M7"
 status = "partial"
 commands = ["edit.edit_text"]
-tools = []
+tools = ["text_script"]
 evidence = [
+  "crates/engine/src/text_script.rs::every_form_toggles_back_to_its_character",
+  "crates/engine/src/text_script.rs::text_with_characters_unicode_cannot_raise_toggles_back",
   "crates/ui-egui/src/tools/edit_text_ui.rs::superscript_and_subscript_conversion",
   "crates/ui-egui/tests/it/editing.rs::the_format_panel_toggles_superscript_and_subscript_on_selection",
+  "crates/automation/tests/it/automation.rs::superscript_and_subscript_through_tools",
 ]
-notes = "Toggled in the Format text panel for the selection. Uses Unicode superscript and subscript forms (2 ↔ ²) rather than text rise (Ts) and font scaling, so the font must provide the corresponding glyphs and extracted text contains the Unicode characters."
+notes = "Toggled in the Format text panel for the selection, and headlessly with text_script on a paragraph or a byte range of it; each toggle of a paragraph is one undo step. Uses Unicode superscript and subscript forms (2 ↔ ²) rather than text rise (Ts) and font scaling, so the font must provide the corresponding glyphs and extracted text contains the Unicode characters. Characters Unicode has no form for (q, most capitals in subscript) stay as they are and don't stop a toggle back; the minus sign comes back as a hyphen-minus."
 
 [[feature]]
 id = "edit.paragraph-alignment"

@@ -1439,6 +1439,14 @@ pub fn tools() -> Vec<ToolDef> {
                     "scale": { "type": "number", "description": "Horizontal scale in percent." } }),
                 &["doc", "page"],
             )),
+        t("text_script", "Superscript or subscript", "Format text ▸ Superscript or Subscript on one paragraph (paragraph, from text_paragraphs), or on range [start, end): UTF-8 byte offsets of its editor_text. The characters take the Unicode superscript or subscript forms (2 → ², 2 → ₂; the font must have those glyphs, and extracted text contains them); text already in that script goes back to plain characters. Characters Unicode has no such form for (q, a space) stay as they are and don't stop a second call toggling back. The paragraph is then rewritten as text_edit rewrites it, with the same result fields. Refused when no character would change. Undoable.")
+            .cmd("edit.edit_text")
+            .with(schema(
+                json!({ "doc": doc(), "page": { "type": "integer", "minimum": 1 }, "paragraph": { "type": "integer", "minimum": 1 },
+                    "script": { "type": "string", "enum": ["superscript", "subscript"] },
+                    "range": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2, "maxItems": 2, "description": "UTF-8 byte offsets [start, end) of the paragraph's editor_text; the whole paragraph when omitted." } }),
+                &["doc", "page", "paragraph", "script"],
+            )),
         t("doc_revisions", "List revisions", "List the document's saved revisions (oldest first): each incremental update is one. Returns revision number, where it ends in the file and its size, and which signatures sign exactly that revision.")
             .with(schema(json!({ "doc": doc() }), &["doc"])),
         t("doc_open_revision", "Open a revision", "Open saved revision `revision` (1 = the oldest) of a document as a new, unsaved document, to see the file as it was then.")
