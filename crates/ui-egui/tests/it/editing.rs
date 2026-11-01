@@ -7904,50 +7904,6 @@ fn test_image_context_menu_precedence() {
 }
 
 #[test]
-fn test_crop_updates_rect_instantly() {
-    let mut png = Vec::new();
-    image::RgbImage::from_pixel(100, 50, image::Rgb([100, 150, 200])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
-
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
-        let mut app = PdfCraftApp::new();
-        app.set_option("language", "en").unwrap();
-        app.open_bytes("form.pdf", None, include_bytes!("../data/form.pdf").to_vec()).unwrap();
-        app
-    });
-    h.run_steps(4);
-    assert!(h.state_mut().execute("edit.text"));
-    h.run_steps(2);
-
-    // Add image via content_ui
-    h.state_mut().add_image("logo.png".into(), png);
-    h.run_steps(3);
-
-    let id = h.state().views[0].id;
-    let initial_img = match &h.state().session.get(id).unwrap().added()[0].content {
-        pdfcraft_engine::AddedContent::Image(img) => img.clone(),
-        _ => panic!("expected AddedContent::Image"),
-    };
-    let initial_w = initial_img.rect.width();
-
-    // Trigger a crop event that removes 50% of an image's width
-    let mut cropped = initial_img.clone();
-    pdfcraft_ui_egui::content_ui::update_image_crop(&mut cropped, [0.5, 0.0, 0.0, 0.0]);
-    let update_edit = pdfcraft_engine::Edit::UpdateContent { page: 0, index: 0, content: pdfcraft_engine::AddedContent::Image(cropped) };
-    h.state_mut().apply_edit(update_edit);
-
-    // Assert that in the immediate next frame, the image.rect.width() is exactly 50% of the original, with no padding left over
-    h.run_steps(1);
-    let doc = h.state().session.get(id).unwrap();
-    let img = match &doc.added()[0].content {
-        pdfcraft_engine::AddedContent::Image(img) => img.clone(),
-        _ => panic!("expected AddedContent::Image"),
-    };
-    let w = img.rect.width();
-    let expected_w = initial_w * 0.5;
-    assert!((w - expected_w).abs() < 1e-3, "image.rect.width() must be exactly 50% ({expected_w}), got {w}");
-}
-
-#[test]
 fn crop_action_pills_interactive_and_apply_cancel_reset() {
     let mut png = Vec::new();
     image::RgbImage::from_pixel(100, 100, image::Rgb([100, 150, 200]))

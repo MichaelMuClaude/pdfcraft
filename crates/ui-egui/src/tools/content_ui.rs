@@ -1307,64 +1307,6 @@ pub(crate) fn image_panel(ui: &mut egui::Ui, t: &Tokens, img: &pdfcraft_engine::
     out
 }
 
-/// Update an added image's crop box and adjust its rect dimensions immediately.
-pub fn update_image_crop(img: &mut pdfcraft_engine::AddedImage, new_crop: [f64; 4]) {
-    let new_crop = [new_crop[0].clamp(0.0, 0.95), new_crop[1].clamp(0.0, 0.95), new_crop[2].clamp(0.0, 0.95), new_crop[3].clamp(0.0, 0.95)];
-    if new_crop != img.crop {
-        let [old_l, old_b, old_r, old_t] = img.crop.map(|v| v.clamp(0.0, 0.95));
-        let old_cw = (1.0 - old_l - old_r).max(0.05);
-        let old_ch = (1.0 - old_b - old_t).max(0.05);
-
-        let [new_l, new_b, new_r, new_t] = new_crop;
-        let new_cw = (1.0 - new_l - new_r).max(0.05);
-        let new_ch = (1.0 - new_b - new_t).max(0.05);
-
-        let [x0, y0, x1, y1] =
-            [img.rect[0].min(img.rect[2]), img.rect[1].min(img.rect[3]), img.rect[0].max(img.rect[2]), img.rect[1].max(img.rect[3])];
-        let current_w = x1 - x0;
-        let current_h = y1 - y0;
-
-        let base_w = current_w / old_cw;
-        let base_h = current_h / old_ch;
-
-        let new_w = base_w * new_cw;
-        let new_h = base_h * new_ch;
-
-        let (ux, uy, vx, vy): (f64, f64, f64, f64) = match img.rotation % 4 {
-            1 => (0.0, 1.0, -1.0, 0.0),
-            2 => (-1.0, 0.0, 0.0, -1.0),
-            3 => (0.0, -1.0, 1.0, 0.0),
-            _ => (1.0, 0.0, 0.0, 1.0),
-        };
-        let (ux, uy) = if img.flip_h { (-ux, -uy) } else { (ux, uy) };
-        let (vx, vy) = if img.flip_v { (-vx, -vy) } else { (vx, vy) };
-
-        let base_ox = x0
-            - (base_w * old_l) * ux.max(0.0)
-            - (base_w * old_r) * (-ux).max(0.0)
-            - (base_h * old_b) * vx.max(0.0)
-            - (base_h * old_t) * (-vx).max(0.0);
-        let base_oy = y0
-            - (base_w * old_l) * uy.max(0.0)
-            - (base_w * old_r) * (-uy).max(0.0)
-            - (base_h * old_b) * vy.max(0.0)
-            - (base_h * old_t) * (-vy).max(0.0);
-
-        let new_ox = base_ox
-            + (base_w * new_l) * ux.max(0.0)
-            + (base_w * new_r) * (-ux).max(0.0)
-            + (base_h * new_b) * vx.max(0.0)
-            + (base_h * new_t) * (-vx).max(0.0);
-        let new_oy = base_oy
-            + (base_w * new_l) * uy.max(0.0)
-            + (base_w * new_r) * (-uy).max(0.0)
-            + (base_h * new_b) * vy.max(0.0)
-            + (base_h * new_t) * (-vy).max(0.0);
-
-        img.crop = new_crop;
-        img.rect = [new_ox, new_oy, new_ox + new_w, new_oy + new_h];
-    }
-}
 /// The editor's layout of added text with character spacing. The page puts the spacing after every
 /// character, the last of a line included (`latin_width`), while epaint puts it only between
 /// characters: the wrap width gives up one spacing so both break lines at the same place.
