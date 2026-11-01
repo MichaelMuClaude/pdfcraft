@@ -763,14 +763,14 @@ impl ExtendedGStateTracker {
 }
 
 /// The drawing-state operators besides colour that a moved unit restores, in the order it writes them.
-const DRAWING_PARAMS: [&str; 7] = ["w", "J", "j", "M", "d", "ri", "i"];
+const DRAWING_PARAMS: [&str; 14] = ["w", "J", "j", "M", "d", "ri", "i", "Tc", "Tw", "Tz", "TL", "Tr", "Ts", "Tf"];
 
 #[derive(Clone, Default, Debug, PartialEq)]
 struct DrawingState {
     non_stroking_color: Option<SharedColorOps>,
     stroking_color: Option<SharedColorOps>,
     /// The last operator of each of [`DRAWING_PARAMS`].
-    params: [Option<std::rc::Rc<Op>>; 7],
+    params: [Option<std::rc::Rc<Op>>; DRAWING_PARAMS.len()],
 }
 
 // Save/restore shares operand storage, including when only the current colour changes under q.
@@ -822,7 +822,7 @@ impl DrawingStateTracker {
     }
 }
 
-/// Initial line-style parameters and rendering intent (ISO 32000-2 Table 51).
+/// Initial line style, rendering intent and text-state parameters.
 fn initial_param(name: &str) -> Option<Op> {
     use pdfcraft_content::num;
     let operands = match name {
@@ -831,6 +831,8 @@ fn initial_param(name: &str) -> Option<Op> {
         "M" => vec![num(10.0)],
         "d" => vec![Object::Array(vec![]), num(0.0)],
         "ri" => vec![Object::name("RelativeColorimetric")],
+        "Tc" | "Tw" | "TL" | "Tr" | "Ts" => vec![num(0.0)],
+        "Tz" => vec![num(100.0)],
         _ => return None,
     };
     Some(Op::new(name, operands))
@@ -851,12 +853,20 @@ fn compute_inherited_drawing_ops(source: &DrawingState, dest: &DrawingState, ext
             (false, None, Some(_)) => ops.push(Op::new(black, vec![pdfcraft_content::num(0.0)])),
         }
     }
+    let mut text_ops = Vec::new();
     for ((name, source), dest) in DRAWING_PARAMS.iter().zip(&source.params).zip(&dest.params) {
+        let output = if matches!(*name, "Tc" | "Tw" | "Tz" | "TL" | "Tr" | "Ts" | "Tf") { &mut text_ops } else { &mut ops };
         match (sets(&[name]), source, dest) {
             (true, _, _) | (false, None, None) => {}
-            (false, Some(op), _) => ops.push((**op).clone()),
-            (false, None, Some(_)) => ops.extend(initial_param(name)),
+            (false, Some(op), _) => output.push((**op).clone()),
+            (false, None, Some(_)) => output.extend(initial_param(name)),
         }
+    }
+    if !text_ops.is_empty() {
+        // Forms inherit text state, even though each BT resets its text matrices.
+        ops.push(Op::new("BT", vec![]));
+        ops.extend(text_ops);
+        ops.push(Op::new("ET", vec![]));
     }
     ops
 }
@@ -1307,6 +1317,13 @@ fn arrange_image(
         state.apply(op)?;
         tracker.step(op, &ext_gstates, doc, state.placement.matrix)?;
         drawing_tracker.step(op)?;
+        if op.is("gs")
+            && op.name(0).and_then(|name| tracker.definitions.get(name)).and_then(|gs| gs.as_dict()).is_some_and(|gs| gs.get(b"Font").is_some())
+            && let Some(font) = DRAWING_PARAMS.iter().position(|name| *name == "Tf").and_then(|index| drawing_tracker.current.params.get_mut(index))
+        {
+            // The replayed gs selects its font; do not overwrite it with an older direct Tf.
+            *font = None;
+        }
         if op.is("gs")
             && let Some(intent) = &tracker.current_state.rendering_intent
         {

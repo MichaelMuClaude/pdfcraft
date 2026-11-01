@@ -10176,6 +10176,26 @@ fn review_state_raster(doc: &Document) -> Vec<u8> {
     renderer.render(pdfcraft_render::RenderRequest { page: 0, scale: 1.0, ..Default::default() }).rgba.to_vec()
 }
 
+#[test]
+fn review_arrange_form_keeps_inherited_text_spacing() {
+    for (spacing, later_spacing) in [(0, false), (12, false), (0, true)] {
+        let initial = if later_spacing { String::new() } else { format!("BT {spacing} Tc ET") };
+        let later = if later_spacing { "BT 12 Tc ET" } else { "" };
+        let content = format!("q {initial} q 1 0 0 1 20 20 cm /Fm0 Do Q Q {later} q 0 0 1 rg 200 200 5 5 re f Q");
+        let mut doc = form_page_with(&content);
+        let form = pdfcraft_cos::ObjRef::new(6, 0);
+        let dict = doc.get(form).as_dict().unwrap().clone();
+        doc.set(form, Object::Stream(pdfcraft_cos::Stream::from_raw(dict, b"BT /F1 20 Tf 0 15 Td (ABC) Tj ET".to_vec())));
+        let doc_before = reopen(&doc);
+        let before = review_state_raster(&doc_before);
+        assert!(before.as_chunks::<4>().0.iter().any(|p| p[0] == 0 && p[1] == 0 && p[2] == 0), "the Form actually paints text");
+        arrange(&mut doc, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+        let saved = reopen(&doc);
+        assert_eq!(images::page_images(&saved, 0).unwrap()[0].rect, images::page_images(&doc_before, 0).unwrap()[0].rect);
+        assert_eq!(review_state_raster(&saved), before, "inherited {spacing} Tc must survive arranging the Form and reopening");
+    }
+}
+
 fn review_shared_mask_page(states: &str, luminosity_b: bool, mask_paint: &str) -> Document {
     let content = format!("q {states} q 100 0 0 100 20 20 cm /Im0 Do Q Q q 0 0 1 rg 200 200 5 5 re f Q");
     let stream = format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len());
