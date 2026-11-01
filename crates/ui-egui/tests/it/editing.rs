@@ -7724,22 +7724,6 @@ fn rotated_image_selection_and_crop() {
     assert!(h.state().views[0].image_selection.as_ref().is_some_and(|s| s.crop.is_none()), "crop mode ended");
 }
 
-trait RectExt {
-    fn width(&self) -> f64;
-}
-
-impl RectExt for [f64; 4] {
-    fn width(&self) -> f64 {
-        (self[2] - self[0]).abs()
-    }
-}
-
-impl RectExt for egui::Rect {
-    fn width(&self) -> f64 {
-        f64::from(self.width())
-    }
-}
-
 #[test]
 fn test_image_8_handles_render_and_drag() {
     let mut png = Vec::new();

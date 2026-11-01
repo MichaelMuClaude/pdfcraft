@@ -886,9 +886,9 @@ impl Automation {
                     [start, end] => usize::try_from(*start).ok().zip(usize::try_from(*end).ok()),
                     _ => None,
                 };
-                let range = bounds.map(|(start, end)| start..end).filter(|r| {
-                    r.start < r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end)
-                });
+                let range = bounds
+                    .map(|(start, end)| start..end)
+                    .filter(|r| r.start < r.end && r.end <= text.len() && text.is_char_boundary(r.start) && text.is_char_boundary(r.end));
                 let Some(range) = range else {
                     return Err(ToolError::InvalidArgs(format!(
                         "range must be [start, end]: UTF-8 byte offsets of the paragraph's editor_text (from text_paragraphs) with start < end <= {}, on character boundaries",

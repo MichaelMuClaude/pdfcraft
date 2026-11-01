@@ -3293,7 +3293,8 @@ fn superscript_and_subscript_through_tools() {
     let dir = workdir("text-script");
     let mut a = auto(&dir);
     let doc = ok(&mut a, "doc_open", json!({ "path": "a.pdf" }))["doc"].as_u64().unwrap();
-    let paragraph = |a: &mut Automation| ok(a, "text_paragraphs", json!({ "doc": doc, "page": 2 }))["paragraphs"][0]["text"].as_str().unwrap().to_string();
+    let paragraph =
+        |a: &mut Automation| ok(a, "text_paragraphs", json!({ "doc": doc, "page": 2 }))["paragraphs"][0]["text"].as_str().unwrap().to_string();
     let script = |script: &str, range: Value| json!({ "doc": doc, "page": 2, "paragraph": 1, "script": script, "range": range });
     // "Page 2": the 2 is byte 5.
     let r = ok(&mut a, "text_script", script("superscript", json!([5, 6])));
