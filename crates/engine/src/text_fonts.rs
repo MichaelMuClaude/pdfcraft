@@ -38,16 +38,19 @@ pub fn discover(roots: &[PathBuf]) -> Vec<FontFile> {
     discover_budgeted(roots, 64u64 << 20)
 }
 
-/// Bounded, symlink-free scan with an explicit total-bytes budget.
+/// Bounded, symlink-free scan. `budget` caps the total size of the fonts listed: a file that
+/// is rejected (unreadable, not openly licensed, a duplicate) does not spend it. Every file read
+/// counts against four times the budget, so a folder of unusable fonts cannot stall the scan.
 pub fn discover_budgeted(roots: &[PathBuf], mut budget: u64) -> Vec<FontFile> {
     use std::io::Read;
     let mut pending: Vec<_> = roots.iter().take(16).map(|r| (r.clone(), 0usize)).collect();
     let mut files = Vec::new();
     let mut entries = 0usize;
+    let mut read_allowance = budget.saturating_mul(4);
     let mut seen = std::collections::HashSet::new();
     let mut seen_face_content = std::collections::HashSet::new();
     while let Some((path, depth)) = pending.pop() {
-        if entries >= 4096 || budget == 0 {
+        if entries >= 4096 || budget == 0 || read_allowance == 0 {
             break;
         }
         entries += 1;
@@ -64,10 +67,10 @@ pub fn discover_budgeted(roots: &[PathBuf], mut budget: u64) -> Vec<FontFile> {
                 pending.extend(sorted_children.into_iter().rev().map(|p| (p, depth + 1)));
             }
         } else if meta.is_file() && meta.len() <= (16 << 20) && font_extension(&path) {
-            if meta.len() > budget {
+            if meta.len() > budget || meta.len() > read_allowance {
                 continue;
             }
-            budget = budget.saturating_sub(meta.len());
+            read_allowance = read_allowance.saturating_sub(meta.len());
             let mut bytes = Vec::new();
             let read = std::fs::File::open(&path).and_then(|f| f.take(meta.len().saturating_add(1)).read_to_end(&mut bytes));
             if read.is_err() || bytes.len() != meta.len() as usize {
@@ -79,6 +82,7 @@ pub fn discover_budgeted(roots: &[PathBuf], mut budget: u64) -> Vec<FontFile> {
             if let Ok((family, face)) = pdfcraft_fonts::embedding::names(&bytes) {
                 let key = font_content_key(&bytes);
                 if seen_face_content.insert((face.clone(), key)) {
+                    budget = budget.saturating_sub(meta.len());
                     files.push(FontFile { path, family, face });
                 }
             }
@@ -175,51 +179,39 @@ mod tests {
     }
 
     #[test]
-    fn test_discover_budgeted_enforces_budget_before_read_and_deterministic_order() {
+    fn rejected_fonts_do_not_spend_the_budget_and_the_order_is_deterministic() {
         let root = std::env::temp_dir().join(format!("pdfcraft-font-budget-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&root);
-
-        let inter_reg = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/Inter-Regular.ttf");
-        let inter_med = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts/Inter-Medium.ttf");
-        assert!(inter_reg.exists() && inter_med.exists());
-
-        let reg_len = std::fs::metadata(&inter_reg).unwrap().len();
-
-        // Write an invalid candidate font first (sorted alphabetically before Inter-Regular)
-        let invalid_path = root.join("00_candidate_invalid.ttf");
-        let invalid_size = 400_000usize;
-        let _ = std::fs::write(&invalid_path, vec![0u8; invalid_size]);
-
-        let reg_path = root.join("01_Inter-Regular.ttf");
-        let _ = std::fs::copy(&inter_reg, &reg_path);
-
-        // Budget is 500_000 bytes.
-        // Candidate invalid file takes 400_000 bytes.
-        // Remaining budget should be 100_000 bytes, which is less than Inter-Regular's ~411 KB.
-        // Therefore, Inter-Regular must NOT be read or included.
-        let budget = 500_000u64;
-        let run1 = discover_budgeted(std::slice::from_ref(&root), budget);
-        let run2 = discover_budgeted(std::slice::from_ref(&root), budget);
-
-        assert_eq!(run1.len(), 0, "candidate invalid file must consume budget before read so later file cannot fit");
-        assert_eq!(run1.len(), run2.len());
-
-        // Now test with enough budget for one valid font:
-        // Budget = invalid_size + reg_len + 10: invalid consumes 400_000, then Inter-Regular (411 KB) fits,
-        // but Inter-Medium (417 KB) exceeds the remaining budget.
-        let med_path = root.join("02_Inter-Medium.ttf");
-        let _ = std::fs::copy(&inter_med, &med_path);
-
-        let single_budget = (invalid_size as u64) + reg_len + 10;
-        let run3 = discover_budgeted(std::slice::from_ref(&root), single_budget);
-        let run4 = discover_budgeted(std::slice::from_ref(&root), single_budget);
-
         let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
 
-        assert_eq!(run3.len(), 1, "only files that fit within budget are read and returned");
-        assert_eq!(run3[0].face, "Inter-Regular");
-        assert_eq!(run3.len(), run4.len());
-        assert_eq!(run3[0].face, run4[0].face);
-        assert_eq!(run3[0].path, run4[0].path);
+        let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/fonts");
+        let reg_len = std::fs::metadata(fonts.join("Inter-Regular.ttf")).unwrap().len();
+        let med_len = std::fs::metadata(fonts.join("Inter-Medium.ttf")).unwrap().len();
+
+        // An unusable candidate, scanned first (sorted before the real fonts).
+        std::fs::write(root.join("00_candidate_invalid.ttf"), vec![0u8; 400_000]).unwrap();
+        std::fs::copy(fonts.join("Inter-Regular.ttf"), root.join("01_Inter-Regular.ttf")).unwrap();
+
+        // The budget fits Inter-Regular alone; the rejected file must not use it up first.
+        let run1 = discover_budgeted(std::slice::from_ref(&root), reg_len + 10);
+        let run2 = discover_budgeted(std::slice::from_ref(&root), reg_len + 10);
+        let faces = |run: &[FontFile]| run.iter().map(|f| (f.face.clone(), f.path.clone())).collect::<Vec<_>>();
+        assert_eq!(run1.iter().map(|f| f.face.as_str()).collect::<Vec<_>>(), ["Inter-Regular"], "a rejected file spends no budget");
+        assert_eq!(faces(&run1), faces(&run2));
+
+        // Accepted fonts do spend it: Inter-Medium no longer fits after Inter-Regular.
+        std::fs::copy(fonts.join("Inter-Medium.ttf"), root.join("02_Inter-Medium.ttf")).unwrap();
+        let one = discover_budgeted(std::slice::from_ref(&root), reg_len + 10);
+        assert_eq!(one.iter().map(|f| f.face.as_str()).collect::<Vec<_>>(), ["Inter-Regular"]);
+        let both = discover_budgeted(std::slice::from_ref(&root), reg_len + med_len);
+        assert_eq!(both.len(), 2);
+
+        // Reading stops at four times the budget, whatever was rejected.
+        for i in 0..4 {
+            std::fs::write(root.join(format!("00_unusable_{i}.ttf")), vec![0u8; reg_len as usize]).unwrap();
+        }
+        let capped = discover_budgeted(std::slice::from_ref(&root), reg_len + 10);
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(capped.is_empty(), "the read allowance ends the scan before the real fonts");
     }
 }
