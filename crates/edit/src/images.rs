@@ -1894,8 +1894,12 @@ pub(crate) fn translate_images(doc: &mut Document, page: usize, indexes: &[usize
             }
             ops.get(at)?.nums::<6>().map(|m| (at, Matrix(m)))
         };
-        if let Some((at, cm)) = enclosing_transform(&ops, start, end).or_else(leading_transform) {
-            let folded = local.then(&cm);
+        // An enclosing cm is before the captured placement; an inside-scope cm is after it.
+        // Their multiplication orders differ when that cm scales or shears a translation.
+        let folded = enclosing_transform(&ops, start, end)
+            .map(|(at, cm)| (at, local.then(&cm)))
+            .or_else(|| leading_transform().map(|(at, cm)| (at, cm.then(&local))));
+        if let Some((at, folded)) = folded {
             if !folded.0.iter().all(|v| v.is_finite() && v.abs() <= 1e12) {
                 return Err(EditError::Invalid("the image move is too large".into()));
             }

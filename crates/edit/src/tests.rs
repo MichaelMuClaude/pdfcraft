@@ -10275,3 +10275,31 @@ fn review_soft_masks_sharing_a_group_keep_distinct_configurations() {
         assert!(state.visually_differs(&luminosity), "mask backdrop and transfer function belong to its definition");
     }
 }
+
+#[test]
+fn review_inside_scope_group_move_matches_direct_transform_under_outer_scale() {
+    for scale in [1, 2] {
+        let content = format!("{scale} 0 0 {scale} 0 0 cm q 40 0 0 40 10 10 cm /Im0 Do Q q 0 0 1 rg 75 75 5 5 re f Q");
+        let mut cropped = image_page_with(&content);
+        let keep = if scale == 2 { [30.0, 30.0, 70.0, 70.0] } else { [15.0, 15.0, 35.0, 35.0] };
+        crop(&mut cropped, 0, 0, keep).unwrap();
+        arrange(&mut cropped, 0, 0, images::ArrangeOrder::BringToFront).unwrap();
+        for offset in [[10.0, 0.0], [0.0, 10.0], [-10.0, 3.0]] {
+            let mut grouped = reopen(&cropped);
+            let mut direct = reopen(&cropped);
+            let before = images::page_images(&grouped, 0).unwrap()[0].clone();
+            images::translate_images(&mut grouped, 0, &[0], offset).unwrap();
+            images::change_image(&mut direct, 0, 0, &images::ImageChange::Transform([1.0, 0.0, 0.0, 1.0, offset[0], offset[1]])).unwrap();
+            let moved = |r: [f64; 4]| [r[0] + offset[0], r[1] + offset[1], r[2] + offset[0], r[3] + offset[1]];
+            let saved = reopen(&grouped);
+            let image = &images::page_images(&saved, 0).unwrap()[0];
+            assert!(close(image.rect, moved(before.rect)), "scale {scale} offset {offset:?}: {:?}", image.rect);
+            assert!(close(image.visible_rect.unwrap(), moved(before.visible_rect.unwrap())), "the crop follows the complete displacement");
+            assert_eq!(
+                review_state_raster(&saved),
+                review_state_raster(&reopen(&direct)),
+                "group and direct transforms must agree, preserving other artwork"
+            );
+        }
+    }
+}
