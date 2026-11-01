@@ -10342,3 +10342,78 @@ fn editor_crop_group_move_and_arrange_survive_added_item_deletion_through_tools(
     let rendered = a.call("page_render", &json!({"doc":saved,"page":1,"dpi":72})).unwrap();
     assert!(rendered.iter().any(|c| matches!(c, Content::Png {data,width,height} if !data.is_empty() && *width > 0 && *height > 0)));
 }
+
+#[test]
+fn image_flip_tools_follow_displayed_axes_on_every_page_rotation() {
+    fn corners(a: &Automation, id: u64) -> [[f64; 2]; 4] {
+        let doc = a.session().get(pdfcraft_engine::DocId(id)).unwrap();
+        let [aa, b, c, d, e, f] = doc.page_images(0)[0].matrix;
+        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .map(|(x, y)| doc.info.pages[0].user_to_view((aa * x + c * y + e) as f32, (b * x + d * y + f) as f32).map(f64::from))
+    }
+    fn raster(a: &mut Automation, id: u64) -> (usize, usize, Vec<u8>) {
+        let rendered = a.call("page_render", &json!({"doc":id,"page":1,"dpi":72})).unwrap();
+        let Content::Png { data, .. } = &rendered[0] else { panic!("expected PNG") };
+        let mut reader = png::Decoder::new(std::io::Cursor::new(data)).read_info().unwrap();
+        let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
+        let frame = reader.next_frame(&mut bytes).unwrap();
+        bytes.truncate(frame.buffer_size());
+        if frame.color_type == png::ColorType::Rgb {
+            bytes = bytes.as_chunks::<3>().0.iter().flat_map(|&[r, g, b]| [r, g, b, 255]).collect();
+        } else {
+            assert_eq!(frame.color_type, png::ColorType::Rgba);
+        }
+        (frame.width as usize, frame.height as usize, bytes)
+    }
+    let dir = workdir("displayed-image-flip");
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, 8, 4);
+        encoder.set_color(png::ColorType::Rgb);
+        let colors = [[240, 20, 30], [20, 230, 40], [30, 40, 220], [220, 210, 20]];
+        let pixels: Vec<u8> = (0..4).flat_map(|y| (0..8).flat_map(move |x| colors[usize::from(x >= 4) + 2 * usize::from(y >= 2)])).collect();
+        encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+    }
+    std::fs::write(dir.join("quadrants.png"), png_bytes).unwrap();
+    let mut a = auto(&dir);
+    let mut failures = Vec::new();
+    for rotation in [0, 90, 180, 270] {
+        let doc = ok(&mut a, "doc_create", json!({"from":"images","paths":["quadrants.png"]}))["doc"].as_u64().unwrap();
+        if rotation != 0 {
+            ok(&mut a, "page_rotate", json!({"doc":doc,"pages":[1],"degrees":rotation}));
+        }
+        let before = corners(&a, doc);
+        let (width, height, pixels) = raster(&mut a, doc);
+        let xmin = before.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+        let xmax = before.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max);
+        let ymin = before.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
+        let ymax = before.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+        for (action, horizontal) in [("flip_horizontal", true), ("flip_vertical", false)] {
+            ok(&mut a, "image_edit", json!({"doc":doc,"page":1,"image":1,"action":action}));
+            let after = corners(&a, doc);
+            for (old, new) in before.into_iter().zip(after) {
+                let expected = if horizontal { [xmin + xmax - old[0], old[1]] } else { [old[0], ymin + ymax - old[1]] };
+                if new.into_iter().zip(expected).any(|(actual, want)| (actual - want).abs() > 0.001) {
+                    failures.push(format!("rotation {rotation} {action}: corner {old:?} became {new:?}, expected {expected:?}"));
+                    break;
+                }
+            }
+            let (new_width, new_height, actual_pixels) = raster(&mut a, doc);
+            assert_eq!((new_width, new_height), (width, height));
+            let mut expected_pixels = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let source = if horizontal { (y * width + width - 1 - x) * 4 } else { ((height - 1 - y) * width + x) * 4 };
+                    expected_pixels.extend_from_slice(&pixels[source..source + 4]);
+                }
+            }
+            if actual_pixels.iter().zip(&expected_pixels).any(|(actual, want)| actual.abs_diff(*want) > 1) {
+                failures.push(format!("rotation {rotation} {action}: raster flipped the wrong displayed axis"));
+            }
+            assert_ne!(actual_pixels, pixels, "the asymmetric image makes both flip axes observable");
+            ok(&mut a, "edit_undo", json!({"doc":doc}));
+            assert_eq!(corners(&a, doc), before, "one undo restores the original placement");
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

@@ -449,8 +449,12 @@ impl Automation {
                             let (u0, u1) = (info.view_to_user(r[0] as f32, r[1] as f32), info.view_to_user(r[2] as f32, r[3] as f32));
                             ImageEdit::Crop([u0[0].min(u1[0]) as f64, u0[1].min(u1[1]) as f64, u0[0].max(u1[0]) as f64, u0[1].max(u1[1]) as f64])
                         }
-                        "flip_horizontal" => ImageEdit::Flip { horizontal: true },
-                        "flip_vertical" => ImageEdit::Flip { horizontal: false },
+                        action @ ("flip_horizontal" | "flip_vertical") => {
+                            let horizontal = action == "flip_horizontal";
+                            let info = self.doc(&a)?.info.pages.get(page).ok_or_else(|| ToolError::InvalidArgs("the page does not exist".into()))?;
+                            // The tool names displayed axes; the engine names PDF user-space axes.
+                            ImageEdit::Flip { horizontal: horizontal ^ (info.rotation % 180 == 90) }
+                        }
                         "delete" => ImageEdit::Delete,
                         "bring_to_front" => ImageEdit::Arrange(pdfcraft_engine::ArrangeOrder::BringToFront),
                         "send_to_back" => ImageEdit::Arrange(pdfcraft_engine::ArrangeOrder::SendToBack),
