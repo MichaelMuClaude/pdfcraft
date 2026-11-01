@@ -4805,8 +4805,6 @@ fn tiny_image_crop_handle_drag_does_not_panic() {
         index: 0,
         drag: None,
         crop: Some(pdfcraft_ui_egui::CropMode::new([100.0, 100.0, 105.0, 105.0])),
-        crop_mode: true,
-        crop_rect: None,
         turning: false,
         settled: None,
     });
@@ -7652,7 +7650,6 @@ fn newer_clipboard_override_beats_stale_in_app_copy() {
 
     // Stale in-app copy: 10x10 red image
     h.state_mut().last_copied_image = Some((10, 10, [255u8, 0, 0, 255].repeat(100)));
-    h.state_mut().last_copied_image_rect = Some([10.0, 10.0, 20.0, 20.0]);
 
     // Newer clipboard override: 50x50 green image
     h.state_mut().clipboard_override = Some(pdfcraft_ui_egui::Clip::Image { width: 50, height: 50, rgba: [0u8, 255, 0, 255].repeat(2500) });
@@ -8061,16 +8058,8 @@ fn arrange_duplicate_image_clears_selection_when_ambiguous() {
     assert_eq!(images[0].name, images[1].name);
 
     // Select the second occurrence (index 1)
-    h.state_mut().views[0].image_selection = Some(pdfcraft_ui_egui::edit_text_ui::ImageSelection {
-        page: 0,
-        index: 1,
-        drag: None,
-        crop: None,
-        crop_mode: false,
-        crop_rect: None,
-        turning: false,
-        settled: None,
-    });
+    h.state_mut().views[0].image_selection =
+        Some(pdfcraft_ui_egui::ImageSelection { page: 0, index: 1, drag: None, crop: None, turning: false, settled: None });
     h.run_steps(2);
 
     // Arrange send to back
@@ -8127,16 +8116,8 @@ fn arrange_unique_image_preserves_selection() {
     assert_eq!(images[1].name, "FigB");
 
     // Select FigA at index 0 and bring it to front (should move after FigB, becoming index 1)
-    h.state_mut().views[0].image_selection = Some(pdfcraft_ui_egui::edit_text_ui::ImageSelection {
-        page: 0,
-        index: 0,
-        drag: None,
-        crop: None,
-        crop_mode: false,
-        crop_rect: None,
-        turning: false,
-        settled: None,
-    });
+    h.state_mut().views[0].image_selection =
+        Some(pdfcraft_ui_egui::ImageSelection { page: 0, index: 0, drag: None, crop: None, turning: false, settled: None });
     h.run_steps(2);
 
     let applied = h.state_mut().apply_edit(pdfcraft_engine::Edit::EditPageImage {
@@ -8191,16 +8172,8 @@ fn undo_arrange_re_resolves_image_selection_or_clears() {
     assert_eq!(images[1].name, "FigB");
 
     // Select FigA (back image, index 0)
-    h.state_mut().views[0].image_selection = Some(pdfcraft_ui_egui::edit_text_ui::ImageSelection {
-        page: 0,
-        index: 0,
-        drag: None,
-        crop: None,
-        crop_mode: false,
-        crop_rect: None,
-        turning: false,
-        settled: None,
-    });
+    h.state_mut().views[0].image_selection =
+        Some(pdfcraft_ui_egui::ImageSelection { page: 0, index: 0, drag: None, crop: None, turning: false, settled: None });
     h.run_steps(2);
 
     // Bring to front
@@ -8482,16 +8455,11 @@ fn copy_pasted_image_discards_coordinates_and_moves_without_offset() {
 
     // 2. Copy the image from page 0
     assert!(h.state_mut().copy_page_image(0, 0));
-    // Verify coordinates data was discarded during copy!
-    assert!(h.state().last_copied_image_rect.is_none(), "coordinates data must be discarded during copy");
     assert!(h.state().last_copied_image.is_some(), "image pixel data is kept");
 
     // 3. Paste the image via Ctrl+V (paste_image with rect: None)
     assert!(h.state_mut().paste_image(0, None));
     h.run_steps(3);
-
-    // Verify after paste that coordinates data remains None
-    assert!(h.state().last_copied_image_rect.is_none());
 
     let images_after_paste = h.state().session.get(id).unwrap().page_images(0);
     assert_eq!(images_after_paste.len(), 2, "second image pasted");

@@ -71,7 +71,6 @@ impl PdfCraftApp {
             if !has_override_image && (paste_event_text.is_some() || system_has_text) {
                 self.last_copied_image = None;
                 self.last_copied_file = None;
-                self.last_copied_image_rect = None;
                 return;
             }
 

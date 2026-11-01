@@ -924,7 +924,6 @@ impl crate::PdfCraftApp {
             }
             self.last_copied_file = None;
             self.last_copied_image = Some((w, h, rgba));
-            self.last_copied_image_rect = None;
             Ok((w, h))
         });
         match copied {
@@ -1014,16 +1013,7 @@ impl crate::PdfCraftApp {
         if self.apply_edit(Edit::AddImage { page, rect: None, name, bytes: std::sync::Arc::new(bytes) }) {
             self.views[i].content.selected = Some((page, before_added));
             self.views[i].content.select_added = Some((page, before_added));
-            self.views[i].image_selection = Some(crate::edit_text_ui::ImageSelection {
-                page,
-                index: before_img,
-                crop_mode: false,
-                crop_rect: None,
-                drag: None,
-                crop: None,
-                turning: false,
-                settled: None,
-            });
+            self.views[i].image_selection = Some(crate::edit_text_ui::ImageSelection::at(page, before_img));
             self.quick_tool = crate::QuickTool::EditText;
             self.left = crate::LeftPanel::Tool("edit");
             self.left_open = true;
@@ -1035,18 +1025,17 @@ impl crate::PdfCraftApp {
     /// release of V with no press of V since the last one is the shortcut, even when ⌘ or Ctrl
     /// was let go first. Read every frame, dialogs or not, so a press is never missed.
     pub(crate) fn paste_key_released(&mut self, ctx: &egui::Context) -> bool {
-        self.frame_count = self.frame_count.wrapping_add(1);
         let mut released = false;
         ctx.input(|inp| {
             if inp.modifiers.command {
-                self.last_command_frame = Some((self.frame_count, inp.time));
+                self.last_command_time = Some(inp.time);
             }
             for e in &inp.events {
                 if let egui::Event::Key { key: egui::Key::V, pressed, modifiers, .. } = e {
                     if modifiers.command {
-                        self.last_command_frame = Some((self.frame_count, inp.time));
+                        self.last_command_time = Some(inp.time);
                     }
-                    let command_recent = self.last_command_frame.is_some_and(|(_, t)| inp.time >= t && inp.time - t < 0.35);
+                    let command_recent = self.last_command_time.is_some_and(|t| inp.time >= t && inp.time - t < 0.35);
                     let command_active = modifiers.command || command_recent;
                     if !*pressed && !self.v_pressed && command_active {
                         released = true;
@@ -1117,7 +1106,6 @@ impl crate::PdfCraftApp {
                 if !is_same {
                     self.last_copied_file = None;
                     self.last_copied_image = Some((width as u32, height as u32, rgba.clone()));
-                    self.last_copied_image_rect = None;
                 }
                 crate::create_ui::png_from_rgba(width, height, &rgba).ok().map(|b| ("pasted_image.png".to_string(), b))
             }
@@ -1126,7 +1114,6 @@ impl crate::PdfCraftApp {
                 if matches!(system, Some(crate::create_ui::Clip::Text(_))) {
                     self.last_copied_image = None;
                     self.last_copied_file = None;
-                    self.last_copied_image_rect = None;
                     self.notify_tr("No image on clipboard to paste");
                     return false;
                 }
@@ -1148,7 +1135,6 @@ impl crate::PdfCraftApp {
                         // System clipboard has a newer / external image!
                         self.last_copied_file = None;
                         self.last_copied_image = Some((img_width as u32, img_height as u32, img_bytes.clone()));
-                        self.last_copied_image_rect = None;
                         crate::create_ui::png_from_rgba(img_width, img_height, &img_bytes).ok().map(|b| ("clipboard_image.png".to_string(), b))
                     }
                 } else if let Some((name, bytes)) = self.last_copied_file.clone() {
@@ -1187,7 +1173,6 @@ impl crate::PdfCraftApp {
         };
 
         if self.apply_edit(pdfcraft_engine::Edit::AddImage { page, rect: target_rect, name, bytes: std::sync::Arc::new(bytes) }) {
-            self.last_copied_image_rect = None;
             let added_count = self.session.get(id).map_or(0, |d| d.added().iter().filter(|a| a.page == page).count());
             let added_idx = added_count.saturating_sub(1);
             let pasted_idx = self.session.get(id).map_or(0, |d| {
@@ -1210,16 +1195,7 @@ impl crate::PdfCraftApp {
                 v.current = page;
                 v.content.selected = Some((page, added_idx));
                 v.content.select_added = Some((page, added_idx));
-                v.image_selection = Some(crate::edit_text_ui::ImageSelection {
-                    page,
-                    index: pasted_idx,
-                    crop_mode: false,
-                    crop_rect: None,
-                    drag: None,
-                    crop: None,
-                    turning: false,
-                    settled: None,
-                });
+                v.image_selection = Some(crate::edit_text_ui::ImageSelection::at(page, pasted_idx));
             }
             self.quick_tool = crate::QuickTool::EditText;
             self.notify_tr("Image pasted");
@@ -1339,8 +1315,7 @@ mod tests {
     fn a_plain_v_release_long_after_command_is_not_a_paste() {
         let mut app = crate::PdfCraftApp::new();
         let ctx = egui::Context::default();
-        app.frame_count = 1;
-        app.last_command_frame = Some((1, 1.0));
+        app.last_command_time = Some(1.0);
         ctx.run_ui(
             egui::RawInput {
                 time: Some(10.0),

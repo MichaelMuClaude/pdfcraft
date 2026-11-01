@@ -78,12 +78,6 @@ pub struct ImageSelection {
     pub drag: Option<ImageDrag>,
     /// Crop mode: the box kept so far.
     pub crop: Option<CropMode>,
-    /// Unused (crop mode is `crop.is_some()`); goes once no literal sets it.
-    #[doc(hidden)]
-    pub crop_mode: bool,
-    /// Unused; goes once no literal sets it.
-    #[doc(hidden)]
-    pub crop_rect: Option<Rect>,
     /// The drag is turning the picture by its rotate handle (the `drag` start is then unused).
     pub turning: bool,
     /// A move or resize applied on release: the frame it had and the one it got, in the page's
@@ -94,7 +88,7 @@ pub struct ImageSelection {
 impl ImageSelection {
     /// Select a page image without an active gesture.
     pub fn at(page: usize, index: usize) -> Self {
-        Self { page, index, drag: None, crop: None, crop_mode: false, crop_rect: None, turning: false, settled: None }
+        Self { page, index, drag: None, crop: None, turning: false, settled: None }
     }
 
     /// Cancel an in-progress text, rotation or crop drag and restore the crop it was previewing.

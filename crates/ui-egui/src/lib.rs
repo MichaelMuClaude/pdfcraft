@@ -152,8 +152,8 @@ pub use tools::bulk_fields;
 use tools::calc_order_ui;
 use tools::camera_ui;
 pub use tools::comments;
-pub use tools::content_ui;
-pub use tools::edit_text_ui;
+use tools::content_ui;
+use tools::edit_text_ui;
 pub use tools::field_table_ui;
 pub use tools::fill_sign;
 pub use tools::forms_ui;
@@ -551,14 +551,12 @@ pub struct PdfCraftApp {
     /// The last image copied in its original format (file name, bytes), also put on the
     /// system clipboard as a file when `system_clipboard` is on.
     pub last_copied_file: Option<(String, Vec<u8>)>,
-    pub last_copied_image_rect: Option<[f64; 4]>,
     pub system_clipboard: bool,
     /// What ⌘V reads instead of the system clipboard (tests).
     pub clipboard_override: Option<create_ui::Clip>,
     /// V is down as a plain key press (see [`Self::paste_key_released`]).
     v_pressed: bool,
-    frame_count: u64,
-    last_command_frame: Option<(u64, f64)>,
+    last_command_time: Option<f64>,
     /// Attach file: the file to attach instead of asking (tests, automation).
     pub attach_override: Option<(String, Vec<u8>)>,
     /// Duplicate Field: which field and onto which pages.

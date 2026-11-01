@@ -206,7 +206,6 @@ impl PdfCraftApp {
             self.put_file_on_clipboard(&name, &bytes)?;
             self.last_copied_image = None;
             self.last_copied_file = Some((name, bytes));
-            self.last_copied_image_rect = None;
             Ok(ext)
         });
         match copied {
