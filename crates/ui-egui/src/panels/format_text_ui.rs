@@ -308,7 +308,6 @@ pub(crate) fn panel(
                 let on = pdfcraft_engine::text_script::is_in(p.text, p.selection.as_ref(), script);
                 if icons::button(ui, icon, 30.0, on, tip).clicked() {
                     out.script = Some(script);
-                    out.changed = true;
                 }
             }
         } else {
