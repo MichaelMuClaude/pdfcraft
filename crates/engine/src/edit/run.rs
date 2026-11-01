@@ -310,12 +310,10 @@ fn run_edit_page_image(doc: &mut pdfcraft_cos::Document, page: usize, index: usi
     };
 
     let added_items: Vec<(usize, pdfcraft_edit::Added)> = pdfcraft_edit::list_added(doc).into_iter().filter(|a| a.page == page).enumerate().collect();
-    // Prefer the added item in the image's own content stream; fall back to any showing it.
+    // Ownership belongs to the drawing stream, not the XObject: original and added images may
+    // show the same resource without sharing an editable item.
     let shows_image = |a: &pdfcraft_edit::Added| img.object.is_some_and(|t| matches!(&a.content, AddedContent::Image(ai) if ai.image == t));
-    let matched_added = added_items
-        .iter()
-        .find(|(_, a)| target_stream_obj == Some(a.obj) && (img.object.is_none() || shows_image(a)))
-        .or_else(|| added_items.iter().find(|(_, a)| shows_image(a)));
+    let matched_added = added_items.iter().find(|(_, a)| target_stream_obj == Some(a.obj) && (img.object.is_none() || shows_image(a)));
 
     let mut ai_to_update = None;
     if let Some((added_idx, added_item)) = matched_added

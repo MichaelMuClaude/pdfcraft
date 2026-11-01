@@ -9972,3 +9972,19 @@ fn saving_without_deleting_pages_stays_incremental() {
     let saved = s.save_bytes(id).unwrap();
     assert!(saved.starts_with(original.as_slice()), "an edit that deletes nothing is still appended");
 }
+
+#[test]
+fn original_image_edit_does_not_match_an_added_sibling_of_the_same_xobject() {
+    let mut document = pdfcraft_cos::Document::open(Arc::new(jpeg_cover_pdf(650))).unwrap();
+    let original = pdfcraft_edit::page_images(&document, 0).unwrap()[0].clone();
+    let added = AddedImage::new([20.0, 30.0, 80.0, 90.0], original.object.unwrap());
+    pdfcraft_edit::add_content(&mut document, 0, &AddedContent::Image(added.clone())).unwrap();
+    let bytes = pdfcraft_cos::write_full(&document, &pdfcraft_cos::SaveOptions::default()).unwrap();
+    let mut session = Session::new();
+    let id = session.open("shared-image.pdf", None, Arc::new(bytes), None).unwrap();
+    let before_added = session.get(id).unwrap().added()[0].content.clone();
+    session.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Move([40.0, 50.0, 140.0, 150.0]) }).unwrap();
+    let doc = session.get(id).unwrap();
+    assert_eq!(doc.added()[0].content, before_added, "matching an original Do must not select the added sibling's metadata");
+    assert_eq!(doc.page_images(0)[0].rect, [40.0, 50.0, 140.0, 150.0]);
+}
