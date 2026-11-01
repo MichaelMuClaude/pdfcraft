@@ -129,31 +129,7 @@ impl CropMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Matrix(pub(crate) [f64; 6]);
-
-impl Matrix {
-    pub(crate) fn apply(&self, x: f64, y: f64) -> (f64, f64) {
-        let [a, b, c, d, e, f] = self.0;
-        (a * x + c * y + e, b * x + d * y + f)
-    }
-
-    pub(crate) fn invert(&self) -> Option<Self> {
-        let [a, b, c, d, e, f] = self.0;
-        let det = a * d - b * c;
-        if det.abs() < 1e-12 || !det.is_finite() {
-            return None;
-        }
-        let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
-        Some(Matrix([ia, ib, ic, id, -(e * ia + f * ic), -(e * ib + f * id)]))
-    }
-
-    pub(crate) fn then(&self, then: &Matrix) -> Matrix {
-        let [a, b, c, d, e, f] = self.0;
-        let [a2, b2, c2, d2, e2, f2] = then.0;
-        Matrix([a * a2 + b * c2, a * b2 + b * d2, c * a2 + d * c2, c * b2 + d * d2, e * a2 + f * c2 + e2, e * b2 + f * d2 + f2])
-    }
-}
+pub(crate) use pdfcraft_content::Matrix;
 
 pub(crate) fn user_to_screen(xf: &PageXform, info: &DocInfo, page: usize, x: f64, y: f64) -> Pos2 {
     let Some(p) = info.pages.get(page) else { return Pos2::ZERO };
@@ -218,6 +194,10 @@ mod crop_bounds_tests {
             assert_eq!(clamp_crop(bounds, keep), keep);
         }
     }
+}
+
+fn same_rect(a: [f64; 4], b: [f64; 4]) -> bool {
+    a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-3)
 }
 
 /// Crop mode for the selected image `i` whose visible frame is `b` (screen). Returns `true`
@@ -312,10 +292,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     let font = egui::FontId::proportional(12.5);
     let done_w = painter.layout_no_wrap(tl!("Done").to_string(), font.clone(), Color32::WHITE).size().x + 22.0;
     let cancel_w = painter.layout_no_wrap(tl!("Cancel").to_string(), font.clone(), Color32::WHITE).size().x + 22.0;
-    let is_full_rect = (mode.keep[0] - image.rect[0]).abs() < 1e-3
-        && (mode.keep[1] - image.rect[1]).abs() < 1e-3
-        && (mode.keep[2] - image.rect[2]).abs() < 1e-3
-        && (mode.keep[3] - image.rect[3]).abs() < 1e-3;
+    let is_full_rect = same_rect(mode.keep, image.rect);
     let has_crop = !is_full_rect || image.visible_rect.is_some_and(|v| v != image.rect);
     let reset_w =
         if has_crop { Some(painter.layout_no_wrap(tl!("Remove Crop").to_string(), font.clone(), Color32::WHITE).size().x + 22.0) } else { None };
@@ -362,32 +339,22 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     painter.rect_filled(done, CornerRadius::same(11), done_bg);
     painter.text(done.center(), egui::Align2::CENTER_CENTER, tl!("Done"), font.clone(), Color32::WHITE);
 
-    // Cancel button (panel style with border)
-    let cancel_bg = if cancel_resp.is_pointer_button_down_on() {
-        t.pressed
-    } else if cancel_resp.hovered() {
-        t.hover
-    } else {
-        t.card
-    };
-    let cancel_stroke = Stroke::new(1.0, if cancel_resp.hovered() { ACCENT } else { t.border });
-    let cancel_text = if cancel_resp.hovered() { ACCENT } else { t.text };
-    painter.rect(cancel, CornerRadius::same(11), cancel_bg, cancel_stroke, egui::StrokeKind::Inside);
-    painter.text(cancel.center(), egui::Align2::CENTER_CENTER, tl!("Cancel"), font.clone(), cancel_text);
-
-    // Reset button (panel style with border)
-    if let (Some(r), Some(r_resp)) = (reset, reset_resp.as_ref()) {
-        let reset_bg = if r_resp.is_pointer_button_down_on() {
+    let neutral_pill = |r: Rect, response: &egui::Response, label: &str| {
+        let background = if response.is_pointer_button_down_on() {
             t.pressed
-        } else if r_resp.hovered() {
+        } else if response.hovered() {
             t.hover
         } else {
             t.card
         };
-        let reset_stroke = Stroke::new(1.0, if r_resp.hovered() { ACCENT } else { t.border });
-        let reset_text = if r_resp.hovered() { ACCENT } else { t.text };
-        painter.rect(r, CornerRadius::same(11), reset_bg, reset_stroke, egui::StrokeKind::Inside);
-        painter.text(r.center(), egui::Align2::CENTER_CENTER, tl!("Remove Crop"), font.clone(), reset_text);
+        let border = Stroke::new(1.0, if response.hovered() { ACCENT } else { t.border });
+        let text = if response.hovered() { ACCENT } else { t.text };
+        painter.rect(r, CornerRadius::same(11), background, border, egui::StrokeKind::Inside);
+        painter.text(r.center(), egui::Align2::CENTER_CENTER, label, font.clone(), text);
+    };
+    neutral_pill(cancel, &cancel_resp, tl!("Cancel"));
+    if let (Some(r), Some(response)) = (reset, reset_resp.as_ref()) {
+        neutral_pill(r, response, tl!("Remove Crop"));
     }
 
     if let Some(p) = hover_pos {
@@ -424,10 +391,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
         if let Some(s) = view.image_selection.as_mut() {
             s.crop = None;
         }
-        let is_full = (keep[0] - image.rect[0]).abs() < 1e-3
-            && (keep[1] - image.rect[1]).abs() < 1e-3
-            && (keep[2] - image.rect[2]).abs() < 1e-3
-            && (keep[3] - image.rect[3]).abs() < 1e-3;
+        let is_full = same_rect(keep, image.rect);
         if is_full {
             if image.visible_rect.is_some_and(|v| v != image.rect) {
                 view.pending_edit = Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::RemoveCrop });
@@ -450,19 +414,32 @@ fn stretched_picture(painter: &egui::Painter, xf: &PageXform, tex: egui::Texture
     for r in blank {
         clipped.rect_filled(*r, CornerRadius::ZERO, Color32::WHITE);
     }
+    mapped_picture(
+        &clipped,
+        xf,
+        tex,
+        [from.left_top(), from.right_top(), from.right_bottom(), from.left_bottom()],
+        [to.left_top(), to.right_top(), to.right_bottom(), to.left_bottom()],
+    );
+}
+
+fn mapped_picture(painter: &egui::Painter, xf: &PageXform, tex: egui::TextureId, from: [Pos2; 4], to: [Pos2; 4]) {
     let mut mesh = egui::Mesh::with_texture(tex);
-    for (a, b) in [
-        (from.left_top(), to.left_top()),
-        (from.right_top(), to.right_top()),
-        (from.right_bottom(), to.right_bottom()),
-        (from.left_bottom(), to.left_bottom()),
-    ] {
-        let (u, v) = xf.screen_to_norm(a);
-        mesh.vertices.push(egui::epaint::Vertex { pos: b, uv: Pos2::new(u, v), color: Color32::WHITE });
+    for (from, to) in from.into_iter().zip(to) {
+        let (u, v) = xf.screen_to_norm(from);
+        mesh.vertices.push(egui::epaint::Vertex { pos: to, uv: Pos2::new(u, v), color: Color32::WHITE });
     }
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
-    clipped.add(egui::Shape::mesh(mesh));
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+fn picture_frame(painter: &egui::Painter, obb: &ImageObb, upright: Rect, fill: Color32, stroke: Stroke) {
+    if obb.is_rotated {
+        painter.polygon(obb.corners().to_vec(), fill, stroke);
+    } else if upright.is_positive() {
+        painter.rect(upright, CornerRadius::ZERO, fill, stroke, egui::StrokeKind::Outside);
+    }
 }
 
 /// The selected picture's grips under `p`: its corners and its rotate knob. They are asked after
@@ -602,23 +579,14 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
     }
     let hovered_box = hover_pos.and_then(|p| {
         boxes.iter().enumerate().rposition(|(i, b)| {
-            b.is_positive()
-                && images.get(i).is_some_and(|img| b.contains(p) || quad_contains(ImageObb::from_image(img, xf, info, page).corners(), p))
-                && image_contains(i, p)
+            b.is_positive() && images.get(i).is_some_and(|img| ImageObb::from_image(img, xf, info, page).contains(*b, p)) && image_contains(i, p)
         })
     });
     if !faint_all {
         for i in selected.filter(|_| moving.is_none()).into_iter().chain(hovered_box.filter(|h| Some(*h) != selected)) {
             if let (Some(b), Some(img)) = (boxes.get(i).filter(|b| b.is_positive()), images.get(i)) {
                 let obb = ImageObb::from_image(img, xf, info, page);
-                if obb.is_rotated {
-                    let pts = obb.corners();
-                    for k in 0..4 {
-                        painter.line_segment([pts[k], pts[(k + 1) % 4]], Stroke::new(0.75, ACCENT.gamma_multiply(0.35)));
-                    }
-                } else {
-                    painter.rect_stroke(*b, CornerRadius::ZERO, Stroke::new(0.75, ACCENT.gamma_multiply(0.35)), egui::StrokeKind::Outside);
-                }
+                picture_frame(painter, &obb, *b, Color32::TRANSPARENT, Stroke::new(0.75, ACCENT.gamma_multiply(0.35)));
             }
         }
     }
@@ -627,18 +595,13 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
         let obb = ImageObb::from_image(img, xf, info, page);
         if selected == Some(i) {
             if !dragging {
-                if obb.is_rotated {
-                    painter.polygon(obb.corners().to_vec(), ACCENT.gamma_multiply(0.04), Stroke::NONE);
-                } else {
-                    painter.rect_filled(b, CornerRadius::ZERO, ACCENT.gamma_multiply(0.04));
-                }
+                picture_frame(painter, &obb, b, ACCENT.gamma_multiply(0.04), Stroke::NONE);
             }
-        } else if obb.is_rotated {
-            painter.polygon(obb.corners().to_vec(), Color32::TRANSPARENT, Stroke::new(1.5, ACCENT.gamma_multiply(0.7)));
         } else {
-            painter.rect_stroke(b, CornerRadius::ZERO, Stroke::new(1.5, ACCENT.gamma_multiply(0.7)), egui::StrokeKind::Outside);
+            picture_frame(painter, &obb, b, Color32::TRANSPARENT, Stroke::new(1.5, ACCENT.gamma_multiply(0.7)));
         }
     }
+
     // The selected image: frame, corner handles, dragging.
     if let Some(i) = selected.filter(|i| boxes.get(*i).is_some_and(|b| b.is_positive())) {
         let Some(b) = boxes.get(i).copied() else { return false };
@@ -663,12 +626,11 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
         }
         let (knob, stem) = rotate_knob(b, ui.clip_rect());
         if view.image_selection.as_ref().is_some_and(|s| s.drag.is_none()) {
+            picture_frame(painter, &obb, b, Color32::TRANSPARENT, Stroke::new(1.5, ACCENT));
             if obb.is_rotated {
-                painter.polygon(obb.corners().to_vec(), Color32::TRANSPARENT, Stroke::new(1.5, ACCENT));
                 painter.line_segment([obb.s_tc, obb.s_rot], Stroke::new(1.2, ACCENT));
                 painter.circle(obb.s_rot, 4.5, Color32::WHITE, Stroke::new(1.0, ACCENT));
             } else {
-                painter.rect_stroke(b, CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
                 painter.line_segment([stem, knob], Stroke::new(1.0, ACCENT));
                 painter.circle(knob, 5.0, Color32::WHITE, Stroke::new(1.0, ACCENT));
             }
@@ -695,37 +657,22 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             if obb.s_rot.distance(p) < 8.0 || knob.distance(p) < 8.0 {
                 view.cursor.claim(Layer::Handle, egui::CursorIcon::Grab);
             } else if let Some((h, _)) = obb.handles().iter().find(|(_, pos)| pos.distance(p) < 8.0) {
-                let icon = match h {
-                    ImageHandle::TopLeft | ImageHandle::BottomRight => {
-                        if obb.is_rotated {
+                let icon = if obb.is_rotated {
+                    match h {
+                        ImageHandle::TopLeft | ImageHandle::TopRight | ImageHandle::BottomLeft | ImageHandle::BottomRight => {
                             let v = obb.handle_pos(*h) - obb.screen_center;
                             if v.x * v.y > 0.0 { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::ResizeNeSw }
-                        } else {
-                            egui::CursorIcon::ResizeNwSe
                         }
-                    }
-                    ImageHandle::TopRight | ImageHandle::BottomLeft => {
-                        if obb.is_rotated {
-                            let v = obb.handle_pos(*h) - obb.screen_center;
-                            if v.x * v.y > 0.0 { egui::CursorIcon::ResizeNwSe } else { egui::CursorIcon::ResizeNeSw }
-                        } else {
-                            egui::CursorIcon::ResizeNeSw
-                        }
-                    }
-                    ImageHandle::TopCenter | ImageHandle::BottomCenter => {
-                        if obb.is_rotated && (obb.v_axis.0.abs() > obb.v_axis.1.abs()) {
-                            egui::CursorIcon::ResizeHorizontal
-                        } else {
-                            egui::CursorIcon::ResizeVertical
-                        }
-                    }
-                    ImageHandle::RightCenter | ImageHandle::LeftCenter => {
-                        if obb.is_rotated && (obb.u_axis.1.abs() > obb.u_axis.0.abs()) {
-                            egui::CursorIcon::ResizeVertical
-                        } else {
+                        ImageHandle::TopCenter | ImageHandle::BottomCenter if obb.v_axis.0.abs() > obb.v_axis.1.abs() => {
                             egui::CursorIcon::ResizeHorizontal
                         }
+                        ImageHandle::RightCenter | ImageHandle::LeftCenter if obb.u_axis.1.abs() > obb.u_axis.0.abs() => {
+                            egui::CursorIcon::ResizeVertical
+                        }
+                        _ => h.cursor_icon(),
                     }
+                } else {
+                    h.cursor_icon()
                 };
                 view.cursor.claim(Layer::Handle, icon);
             }
@@ -892,87 +839,38 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
                     let p01 = (e0 + c0, f0 + d0);
                     let p_curr = (px, py);
 
-                    let (new_w, new_h, p00_new, icon) = match handle {
-                        ImageHandle::TopRight => {
-                            let anchor = p00;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let du = d.0 * u_axis.0 + d.1 * u_axis.1;
-                            let dv = d.0 * v_axis.0 + d.1 * v_axis.1;
-                            let su = du / w0;
-                            let sv = dv / h0;
-                            let s = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
-                            let s = s.max(5.0 / w0).max(5.0 / h0);
-                            (w0 * s, h0 * s, anchor, egui::CursorIcon::ResizeNeSw)
-                        }
-                        ImageHandle::TopLeft => {
-                            let anchor = p10;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let du = d.0 * (-u_axis.0) + d.1 * (-u_axis.1);
-                            let dv = d.0 * v_axis.0 + d.1 * v_axis.1;
-                            let su = du / w0;
-                            let sv = dv / h0;
-                            let s = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
-                            let s = s.max(5.0 / w0).max(5.0 / h0);
-                            let nw = w0 * s;
-                            let nh = h0 * s;
-                            (nw, nh, (anchor.0 - nw * u_axis.0, anchor.1 - nw * u_axis.1), egui::CursorIcon::ResizeNwSe)
-                        }
-                        ImageHandle::BottomLeft => {
-                            let anchor = p11;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let du = d.0 * (-u_axis.0) + d.1 * (-u_axis.1);
-                            let dv = d.0 * (-v_axis.0) + d.1 * (-v_axis.1);
-                            let su = du / w0;
-                            let sv = dv / h0;
-                            let s = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
-                            let s = s.max(5.0 / w0).max(5.0 / h0);
-                            let nw = w0 * s;
-                            let nh = h0 * s;
-                            (
-                                nw,
-                                nh,
-                                (anchor.0 - nw * u_axis.0 - nh * v_axis.0, anchor.1 - nw * u_axis.1 - nh * v_axis.1),
-                                egui::CursorIcon::ResizeNeSw,
-                            )
-                        }
-                        ImageHandle::BottomRight => {
-                            let anchor = p01;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let du = d.0 * u_axis.0 + d.1 * u_axis.1;
-                            let dv = d.0 * (-v_axis.0) + d.1 * (-v_axis.1);
-                            let su = du / w0;
-                            let sv = dv / h0;
-                            let s = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
-                            let s = s.max(5.0 / w0).max(5.0 / h0);
-                            let nw = w0 * s;
-                            let nh = h0 * s;
-                            (nw, nh, (anchor.0 - nh * v_axis.0, anchor.1 - nh * v_axis.1), egui::CursorIcon::ResizeNwSe)
-                        }
-                        ImageHandle::RightCenter => {
-                            let anchor = p00;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let du = (d.0 * u_axis.0 + d.1 * u_axis.1).max(5.0);
-                            (du, h0, anchor, egui::CursorIcon::ResizeHorizontal)
-                        }
-                        ImageHandle::LeftCenter => {
-                            let anchor = p10;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let du = (d.0 * (-u_axis.0) + d.1 * (-u_axis.1)).max(5.0);
-                            (du, h0, (anchor.0 - du * u_axis.0, anchor.1 - du * u_axis.1), egui::CursorIcon::ResizeHorizontal)
-                        }
-                        ImageHandle::TopCenter => {
-                            let anchor = p00;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let dv = (d.0 * v_axis.0 + d.1 * v_axis.1).max(5.0);
-                            (w0, dv, anchor, egui::CursorIcon::ResizeVertical)
-                        }
-                        ImageHandle::BottomCenter => {
-                            let anchor = p01;
-                            let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
-                            let dv = (d.0 * (-v_axis.0) + d.1 * (-v_axis.1)).max(5.0);
-                            (w0, dv, (anchor.0 - dv * v_axis.0, anchor.1 - dv * v_axis.1), egui::CursorIcon::ResizeVertical)
-                        }
+                    // Signs point from the fixed opposite edge/corner toward the dragged grip.
+                    let (u, v) = match handle {
+                        ImageHandle::TopRight => (1.0, 1.0),
+                        ImageHandle::TopLeft => (-1.0, 1.0),
+                        ImageHandle::BottomLeft => (-1.0, -1.0),
+                        ImageHandle::BottomRight => (1.0, -1.0),
+                        ImageHandle::RightCenter => (1.0, 0.0),
+                        ImageHandle::LeftCenter => (-1.0, 0.0),
+                        ImageHandle::TopCenter => (0.0, 1.0),
+                        ImageHandle::BottomCenter => (0.0, -1.0),
                     };
+                    let anchor = match (u < 0.0, v < 0.0) {
+                        (false, false) => p00,
+                        (true, false) => p10,
+                        (true, true) => p11,
+                        (false, true) => p01,
+                    };
+                    let d = (p_curr.0 - anchor.0, p_curr.1 - anchor.1);
+                    let du = (d.0 * u_axis.0 + d.1 * u_axis.1) * u;
+                    let dv = (d.0 * v_axis.0 + d.1 * v_axis.1) * v;
+                    let (new_w, new_h) = if u != 0.0 && v != 0.0 {
+                        let (su, sv) = (du / w0, dv / h0);
+                        let scale = if (su - 1.0).abs() >= (sv - 1.0).abs() { su } else { sv };
+                        let scale = scale.max(5.0 / w0).max(5.0 / h0);
+                        (w0 * scale, h0 * scale)
+                    } else {
+                        (if u == 0.0 { w0 } else { du.max(5.0) }, if v == 0.0 { h0 } else { dv.max(5.0) })
+                    };
+                    let offset_u = if u < 0.0 { new_w } else { 0.0 };
+                    let offset_v = if v < 0.0 { new_h } else { 0.0 };
+                    let p00_new = (anchor.0 - offset_u * u_axis.0 - offset_v * v_axis.0, anchor.1 - offset_u * u_axis.1 - offset_v * v_axis.1);
+                    let icon = handle.cursor_icon();
                     let mat = Matrix([new_w * u_axis.0, new_w * u_axis.1, new_h * v_axis.0, new_h * v_axis.1, p00_new.0, p00_new.1]);
                     (mat, icon)
                 }
@@ -983,34 +881,15 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
             let preview_obb = ImageObb::from_matrix(m_new.0, xf, info, page);
             if let Some(tex) = view.page_raster(page) {
                 let clipped = painter.with_clip_rect(painter.clip_rect().intersect(xf.rect));
-                let mut mesh = egui::Mesh::with_texture(tex);
-                let orig_corners = obb.corners();
-                let new_corners = preview_obb.corners();
-                for (from, to) in [
-                    (orig_corners[3], new_corners[3]),
-                    (orig_corners[2], new_corners[2]),
-                    (orig_corners[1], new_corners[1]),
-                    (orig_corners[0], new_corners[0]),
-                ] {
-                    let (u, v) = xf.screen_to_norm(from);
-                    mesh.vertices.push(egui::epaint::Vertex { pos: to, uv: Pos2::new(u, v), color: Color32::WHITE });
-                }
-                mesh.add_triangle(0, 1, 2);
-                mesh.add_triangle(0, 2, 3);
-                clipped.add(egui::Shape::mesh(mesh));
+                let mut from = obb.corners();
+                let mut to = preview_obb.corners();
+                from.reverse();
+                to.reverse();
+                mapped_picture(&clipped, xf, tex, from, to);
             }
 
-            if preview_obb.is_rotated {
-                let pts = preview_obb.corners();
-                painter.polygon(pts.to_vec(), ACCENT.gamma_multiply(0.04), Stroke::new(1.5, ACCENT));
-            } else {
-                let p_rect = Rect::from_two_pos(preview_obb.s01, preview_obb.s10);
-                let visible = p_rect.intersect(xf.rect);
-                if visible.is_positive() {
-                    painter.rect_filled(visible, CornerRadius::ZERO, ACCENT.gamma_multiply(0.04));
-                    painter.rect_stroke(visible, CornerRadius::ZERO, Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
-                }
-            }
+            let visible = Rect::from_two_pos(preview_obb.s01, preview_obb.s10).intersect(xf.rect);
+            picture_frame(painter, &preview_obb, visible, ACCENT.gamma_multiply(0.04), Stroke::new(1.5, ACCENT));
             for (_, h) in preview_obb.handles() {
                 draw_handle(painter, h, false, false, false, ACCENT);
             }
@@ -1048,13 +927,11 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
     let menu_key = image_menu_id();
     let Some(p) = hover_pos.filter(|p| xf.rect.contains(*p)) else { return false };
     let Some(hit) = boxes.iter().enumerate().rposition(|(i, b)| {
-        b.is_positive()
-            && images.get(i).is_some_and(|img| b.contains(p) || quad_contains(ImageObb::from_image(img, xf, info, page).corners(), p))
-            && image_contains(i, p)
+        b.is_positive() && images.get(i).is_some_and(|img| ImageObb::from_image(img, xf, info, page).contains(*b, p)) && image_contains(i, p)
     }) else {
         if resp.secondary_clicked() || resp.clicked() {
             view.image_selection = None;
-            ui.ctx().data_mut(|d| d.insert_persisted(menu_key, false));
+            ui.ctx().data_mut(|d| d.insert_temp(menu_key, false));
         }
         return false;
     };
@@ -1088,7 +965,7 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
         view.image_selection = Some(ImageSelection::at(page, index));
     }
     if resp.secondary_clicked() {
-        ui.ctx().data_mut(|d| d.insert_persisted(menu_key, true));
+        ui.ctx().data_mut(|d| d.insert_temp(menu_key, true));
     }
     true
 }
@@ -1113,7 +990,7 @@ pub(crate) fn image_context_menu(
     let picked = |ui: &mut egui::Ui, entry: egui::Response| {
         let clicked = entry.clicked();
         if clicked {
-            ui.ctx().data_mut(|d| d.insert_persisted(image_menu_id(), false));
+            ui.ctx().data_mut(|d| d.insert_temp(image_menu_id(), false));
             egui::Popup::close_all(ui.ctx());
             ui.close();
         }

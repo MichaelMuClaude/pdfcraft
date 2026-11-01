@@ -164,134 +164,30 @@ pub fn apply_resize_proportional(image_rect: Rect, handle: ImageHandle, delta: V
     }
 }
 
-/// **Non-Destructive Crop System**
-///
-/// In Crop Mode:
-/// 1. The handles adjust the normalized texture coordinates `uv_rect` ([0.0..1.0]).
-/// 2. The screen `image_rect` shrinks/expands proportionally in lockstep.
-/// 3. The pixel scale (`screen_pixels / uv_span`) remains invariant, ensuring that
-///    the visible image content NEVER stretches, jumps, or distorts.
-/// 4. The diagonally opposite point/edge is strictly locked as the fixed anchor.
-///
-/// Returns: `(new_image_rect, new_uv_rect)`
+/// Trim a screen rectangle and its UVs together, keeping the opposite edge fixed.
+/// The pixel scale stays unchanged, and each edge stops at the texture boundary.
 pub fn apply_crop(image_rect: Rect, uv_rect: Rect, handle: ImageHandle, delta: Vec2) -> (Rect, Rect) {
-    if !delta.x.is_finite() || !delta.y.is_finite() {
+    if !delta.is_finite() || !image_rect.is_finite() || !uv_rect.is_finite() || !image_rect.is_positive() || !uv_rect.is_positive() {
         return (image_rect, uv_rect);
     }
-    let w_screen = image_rect.width();
-    let h_screen = image_rect.height();
-    let w_uv = uv_rect.width();
-    let h_uv = uv_rect.height();
-
-    // Guard against degraded or non-finite zero rects
-    if w_screen <= 0.0
-        || h_screen <= 0.0
-        || w_uv <= 0.0
-        || h_uv <= 0.0
-        || !w_screen.is_finite()
-        || !h_screen.is_finite()
-        || !w_uv.is_finite()
-        || !h_uv.is_finite()
-    {
+    let scale = image_rect.size() / uv_rect.size();
+    if !scale.is_finite() || scale.x <= 0.0 || scale.y <= 0.0 {
         return (image_rect, uv_rect);
     }
-
-    // Invariant ratios: screen pixels per unit UV and UV per screen pixel
-    let px_per_uv_x = w_screen / w_uv;
-    let px_per_uv_y = h_screen / h_uv;
-    let uv_per_px_x = w_uv / w_screen;
-    let uv_per_px_y = h_uv / h_screen;
-
-    // Minimum UV span corresponding to MIN_RECT_SIZE pixels
-    let min_uv_w = (MIN_RECT_SIZE * uv_per_px_x).min(w_uv * 0.95);
-    let min_uv_h = (MIN_RECT_SIZE * uv_per_px_y).min(h_uv * 0.95);
-
-    let mut new_screen = image_rect;
-    let mut new_uv = uv_rect;
-
-    // Identify which geometric edges are affected by this handle
-    let affects_left = matches!(handle, ImageHandle::TopLeft | ImageHandle::LeftCenter | ImageHandle::BottomLeft);
-    let affects_right = matches!(handle, ImageHandle::TopRight | ImageHandle::RightCenter | ImageHandle::BottomRight);
-    let affects_top = matches!(handle, ImageHandle::TopLeft | ImageHandle::TopCenter | ImageHandle::TopRight);
-    let affects_bottom = matches!(handle, ImageHandle::BottomLeft | ImageHandle::BottomCenter | ImageHandle::BottomRight);
-
-    // ------------------------------------------------------------------------
-    // HORIZONTAL (X) CROP CALCULATION
-    // ------------------------------------------------------------------------
-    if affects_left {
-        // Dragging Left: Fixed Anchor is the Right edge
-        let screen_anchor_x = image_rect.max.x;
-        let uv_anchor_u = uv_rect.max.x;
-
-        // Apply pointer delta in UV space
-        let target_u_min = uv_rect.min.x + delta.x * uv_per_px_x;
-
-        // Clamp: Cannot uncrop past 0.0 (texture edge), nor exceed anchor - min_uv_w
-        let clamped_u_min = target_u_min.clamp(0.0, (uv_anchor_u - min_uv_w).max(0.0));
-
-        // Recalculate screen bounding box from anchor using invariant scale
-        let new_uv_w = uv_anchor_u - clamped_u_min;
-        let new_screen_w = new_uv_w * px_per_uv_x;
-
-        new_uv.min.x = clamped_u_min;
-        new_screen.min.x = screen_anchor_x - new_screen_w;
-        new_screen.max.x = screen_anchor_x; // Explicitly locked
-    } else if affects_right {
-        // Dragging Right: Fixed Anchor is the Left edge
-        let screen_anchor_x = image_rect.min.x;
-        let uv_anchor_u = uv_rect.min.x;
-
-        let target_u_max = uv_rect.max.x + delta.x * uv_per_px_x;
-
-        // Clamp: Cannot crop narrower than anchor + min_uv_w, nor exceed 1.0 (texture edge)
-        let clamped_u_max = target_u_max.clamp((uv_anchor_u + min_uv_w).min(1.0), 1.0);
-
-        let new_uv_w = clamped_u_max - uv_anchor_u;
-        let new_screen_w = new_uv_w * px_per_uv_x;
-
-        new_uv.max.x = clamped_u_max;
-        new_screen.min.x = screen_anchor_x; // Explicitly locked
-        new_screen.max.x = screen_anchor_x + new_screen_w;
+    let minimum = (egui::vec2(MIN_RECT_SIZE, MIN_RECT_SIZE) / scale).min(uv_rect.size() * 0.95);
+    let mut uv = uv_rect;
+    if matches!(handle, ImageHandle::TopLeft | ImageHandle::LeftCenter | ImageHandle::BottomLeft) {
+        uv.min.x = (uv.min.x + delta.x / scale.x).clamp(0.0, (uv.max.x - minimum.x).max(0.0));
+    } else if matches!(handle, ImageHandle::TopRight | ImageHandle::RightCenter | ImageHandle::BottomRight) {
+        uv.max.x = (uv.max.x + delta.x / scale.x).clamp((uv.min.x + minimum.x).min(1.0), 1.0);
     }
-
-    // ------------------------------------------------------------------------
-    // VERTICAL (Y) CROP CALCULATION
-    // ------------------------------------------------------------------------
-    if affects_top {
-        // Dragging Top: Fixed Anchor is the Bottom edge
-        let screen_anchor_y = image_rect.max.y;
-        let uv_anchor_v = uv_rect.max.y;
-
-        let target_v_min = uv_rect.min.y + delta.y * uv_per_px_y;
-
-        // Clamp: Cannot uncrop past 0.0, nor exceed anchor - min_uv_h
-        let clamped_v_min = target_v_min.clamp(0.0, (uv_anchor_v - min_uv_h).max(0.0));
-
-        let new_uv_h = uv_anchor_v - clamped_v_min;
-        let new_screen_h = new_uv_h * px_per_uv_y;
-
-        new_uv.min.y = clamped_v_min;
-        new_screen.min.y = screen_anchor_y - new_screen_h;
-        new_screen.max.y = screen_anchor_y; // Explicitly locked
-    } else if affects_bottom {
-        // Dragging Bottom: Fixed Anchor is the Top edge
-        let screen_anchor_y = image_rect.min.y;
-        let uv_anchor_v = uv_rect.min.y;
-
-        let target_v_max = uv_rect.max.y + delta.y * uv_per_px_y;
-
-        // Clamp: Cannot crop smaller than anchor + min_uv_h, nor exceed 1.0
-        let clamped_v_max = target_v_max.clamp((uv_anchor_v + min_uv_h).min(1.0), 1.0);
-
-        let new_uv_h = clamped_v_max - uv_anchor_v;
-        let new_screen_h = new_uv_h * px_per_uv_y;
-
-        new_uv.max.y = clamped_v_max;
-        new_screen.min.y = screen_anchor_y; // Explicitly locked
-        new_screen.max.y = screen_anchor_y + new_screen_h;
+    if matches!(handle, ImageHandle::TopLeft | ImageHandle::TopCenter | ImageHandle::TopRight) {
+        uv.min.y = (uv.min.y + delta.y / scale.y).clamp(0.0, (uv.max.y - minimum.y).max(0.0));
+    } else if matches!(handle, ImageHandle::BottomLeft | ImageHandle::BottomCenter | ImageHandle::BottomRight) {
+        uv.max.y = (uv.max.y + delta.y / scale.y).clamp((uv.min.y + minimum.y).min(1.0), 1.0);
     }
-
-    (new_screen, new_uv)
+    let screen = Rect::from_min_max(image_rect.min + (uv.min - uv_rect.min) * scale, image_rect.max + (uv.max - uv_rect.max) * scale);
+    (screen, uv)
 }
 
 // ============================================================================
@@ -320,7 +216,7 @@ pub fn draw_rule_of_thirds(painter: &egui::Painter, rect: Rect, stroke: Stroke) 
     painter.line_segment([pos2(rect.min.x, y2), pos2(rect.max.x, y2)], stroke);
 }
 
-/// Renders a circular handle with shadow, fill, and accent stroke matching the sandbox.
+/// Renders a circular handle with shadow, fill, and accent stroke using the image tool accent.
 pub fn draw_handle(painter: &egui::Painter, center: Pos2, is_active: bool, is_hovered: bool, crop_mode: bool, accent_color: Color32) {
     let base_radius = 6.5;
     let circle_radius = if is_active {

@@ -8617,8 +8617,7 @@ fn clicking_after_image_context_menu_action_resets_menu_state_and_updates_select
     h.get_by_label("Flip horizontal").click();
     h.run_steps(3);
 
-    let flag_persisted = h.ctx.data_mut(|d| d.get_persisted::<bool>(pdfcraft_ui_egui::edit_text_ui::image_menu_id()));
-    assert_eq!(flag_persisted, Some(false), "image-menu flag should be reset to false");
+    assert!(h.query_all_by_label("Flip horizontal").next().is_none(), "the image menu closes after its action");
 
     // 7. Click image 1: should switch selection to image 1
     h.hover_at(p1);

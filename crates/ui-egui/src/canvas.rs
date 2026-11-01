@@ -152,6 +152,10 @@ pub struct ImageObb {
 }
 
 impl ImageObb {
+    pub(crate) fn contains(&self, visible: Rect, p: Pos2) -> bool {
+        (visible.is_positive() && visible.contains(p)) || crate::edit_text_ui::quad_contains(self.corners(), p)
+    }
+
     pub fn from_matrix(matrix: [f64; 6], xf: &PageXform, info: &DocInfo, page: usize) -> Self {
         let m = crate::edit_text_ui::Matrix(matrix);
         let p00 = m.apply(0.0, 0.0);
@@ -1297,11 +1301,11 @@ fn paint_page_surface(ui: &mut egui::Ui, view: &mut DocView, frame: &mut PageFra
             None => frame.wanted.push((i, want_scale, want_tag, None)),
         }
         let doc = frame.env.doc;
-        let active_drag_suppress = if let Some(sel) = view.image_selection.as_ref()
+        let active_drag_suppress = if let Some(sel) = view.image_selection.clone()
             && sel.page == i
             && sel.drag.is_some()
         {
-            let images = doc.page_images(i);
+            let images = cached_edit_images(view, doc, i);
             if let Some(img) = images.get(sel.index) {
                 let obb = ImageObb::from_image(img, &xf, info, i);
                 let uvs = obb.corners().map(|c| xf.screen_to_norm(c));
@@ -1705,15 +1709,18 @@ fn edit_inventory(
             l
         }
     };
-    let images = match view.edit_images.get(&i) {
-        Some((g, l)) if *g == generation => l.clone(),
-        _ => {
-            let l = doc.page_images(i);
-            view.edit_images.insert(i, (generation, l.clone()));
-            l
-        }
-    };
+    let images = cached_edit_images(view, doc, i).to_vec();
     (lines, images)
+}
+
+/// Images parsed once per page and document edit generation, shared by painting and menus.
+fn cached_edit_images<'a>(view: &'a mut DocView, doc: &pdfcraft_engine::Document, page: usize) -> &'a [pdfcraft_engine::PageImage] {
+    let generation = doc.edit_generation();
+    let entry = view.edit_images.entry(page).or_insert_with(|| (generation, doc.page_images(page)));
+    if entry.0 != generation {
+        *entry = (generation, doc.page_images(page));
+    }
+    &entry.1
 }
 
 /// What the page modules have under a point on one page, for the page router.
@@ -2386,23 +2393,14 @@ fn draw_pages(
                     }
                     let xf =
                         PageXform { rect: r, rot: view.rotation, pw: info.pages[page_idx].width.max(1.0), ph: info.pages[page_idx].height.max(1.0) };
-                    let images = doc.page_images(page_idx);
+                    let images = cached_edit_images(view, doc, page_idx).to_vec();
                     for (idx, img) in images.iter().enumerate().rev() {
                         let obb = ImageObb::from_image(img, &xf, info, page_idx);
                         let b = image_screen_rect(img, &xf, info, page_idx);
-                        if (b.is_positive() && b.contains(p)) || crate::edit_text_ui::quad_contains(obb.corners(), p) {
+                        if obb.contains(b, p) {
                             over_image = true;
                             if view.image_selection.as_ref().is_none_or(|s| s.page != page_idx || s.index != idx) {
-                                view.image_selection = Some(crate::edit_text_ui::ImageSelection {
-                                    page: page_idx,
-                                    index: idx,
-                                    drag: None,
-                                    crop: None,
-                                    crop_mode: false,
-                                    crop_rect: None,
-                                    turning: false,
-                                    settled: None,
-                                });
+                                view.image_selection = Some(crate::edit_text_ui::ImageSelection::at(page_idx, idx));
                             }
                             break;
                         }
@@ -2582,19 +2580,19 @@ fn draw_pages(
         }
         let can_paste_image = env.can_paste_image;
         let is_image_menu = tool == QuickTool::EditText
-            && (ui.ctx().data_mut(|d| d.get_persisted::<bool>(crate::edit_text_ui::image_menu_id())).unwrap_or(false)
-                || view.image_selection.as_ref().is_some_and(|sel| {
+            && (ui.ctx().data_mut(|d| d.get_temp::<bool>(crate::edit_text_ui::image_menu_id())).unwrap_or(false)
+                || view.image_selection.clone().is_some_and(|sel| {
                     let pointer_pos = ptr.pos;
                     let Some(p) = pointer_pos else { return false };
-                    let Some((_, xf)) = view.screen_xforms.iter().find(|(page_idx, _)| *page_idx == sel.page) else { return false };
-                    let images = doc.page_images(sel.page);
+                    let Some((_, xf)) = view.screen_xforms.iter().find(|(page_idx, _)| *page_idx == sel.page).cloned() else { return false };
+                    let images = cached_edit_images(view, doc, sel.page).to_vec();
                     let Some(img) = images.get(sel.index) else { return false };
-                    let obb = ImageObb::from_image(img, xf, info, sel.page);
-                    let b = image_screen_rect(img, xf, info, sel.page);
-                    (b.is_positive() && b.contains(p)) || crate::edit_text_ui::quad_contains(obb.corners(), p)
+                    let obb = ImageObb::from_image(img, &xf, info, sel.page);
+                    let b = image_screen_rect(img, &xf, info, sel.page);
+                    obb.contains(b, p)
                 }));
         if is_image_menu && let Some(sel) = view.image_selection.clone() {
-            let images = doc.page_images(sel.page);
+            let images = cached_edit_images(view, doc, sel.page).to_vec();
             let at = view.comments.context_at.map(|(_, at)| at);
             crate::edit_text_ui::image_context_menu(ui, view, &images, sel.page, sel.index, can_paste_image, &mut image_action, at);
             return;
@@ -2648,7 +2646,7 @@ fn draw_pages(
         default_page_context_menu(ui, page, at, perms, &mut page_action);
     });
     if !resp.context_menu_opened() {
-        ui.ctx().data_mut(|d| d.insert_persisted(crate::edit_text_ui::image_menu_id(), false));
+        ui.ctx().data_mut(|d| d.insert_temp(crate::edit_text_ui::image_menu_id(), false));
     }
     *out = PageOut {
         canvas_action,
