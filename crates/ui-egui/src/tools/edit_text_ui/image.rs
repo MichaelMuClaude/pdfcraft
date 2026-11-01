@@ -761,7 +761,8 @@ pub(crate) fn image_input(cx: &ImageCx<'_>, images: &[pdfcraft_engine::PageImage
 
         if view.image_selection.as_ref().is_some_and(|s| s.turning) {
             let shift = ui.input(|i| i.modifiers.shift);
-            let centre = obb.screen_center;
+            let visible = image.visible_rect.unwrap_or(image.rect);
+            let centre = user_to_screen(xf, info, page, visible[0] * 0.5 + visible[2] * 0.5, visible[1] * 0.5 + visible[3] * 0.5);
             let rot_knob = shown_knob;
             let drag_start = view.image_selection.as_ref().and_then(|s| s.drag).map_or(rot_knob, |d| d.start);
             let degrees = hover_pos.map_or(0.0, |p| turn_degrees_delta(centre, drag_start, p, shift));

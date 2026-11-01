@@ -9549,3 +9549,69 @@ fn affine_review_resize_uses_press_delta_and_affine_frame() {
         assert!(placements[0].into_iter().zip(placements[1]).all(|(a, b)| (a - b).abs() < 1e-3), "press offset changed placement: {placements:?}");
     }
 }
+
+#[test]
+fn affine_review_cropped_rotation_preview_matches_saved_corners() {
+    let matrix = [70.710678, 70.710678, -70.710678, 70.710678, 170.710678, 100.0];
+    for (clip, rotation) in [(None, 0), (Some([100.0, 170.0, 241.421356, 241.421356]), 0), (Some([100.0, 170.0, 241.421356, 241.421356]), 90)] {
+        let mut h = affine_review_harness(affine_review_image_fixture(matrix, clip, rotation));
+        let view = &h.state().views[0];
+        let id = view.id;
+        let doc = h.state().session.get(id).unwrap();
+        let image = doc.page_images(0)[0].clone();
+        let xf = view.page_xform(0).unwrap();
+        let obb = pdfcraft_ui_egui::canvas::ImageObb::from_image(&image, &xf, &doc.info, 0);
+        let visible = image.visible_rect.unwrap_or(image.rect);
+        let p = doc.info.pages[0].user_to_view(((visible[0] + visible[2]) * 0.5) as f32, ((visible[1] + visible[3]) * 0.5) as f32);
+        let centre = xf.norm_to_screen(p[0] / xf.pw, p[1] / xf.ph);
+        let start = obb.s_rot;
+        let v = start - centre;
+        let finish = centre + egui::vec2(-v.y, v.x);
+        h.hover_at(start);
+        h.run_steps(1);
+        h.drag_at(start);
+        h.run_steps(1);
+        h.hover_at(finish);
+        h.run_steps(2);
+        assert!(h.state().views[0].image_selection.as_ref().unwrap().turning);
+        let preview = h
+            .output()
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Path(path) if path.closed && path.points.len() == 4 && path.stroke.width == 1.5 => Some(path.points.clone()),
+                _ => None,
+            })
+            .expect("rotation preview outline");
+        if clip.is_some()
+            && rotation == 0
+            && let Ok(directory) = std::env::var("PDFCRAFT_AFFINE_SHOTS")
+        {
+            h.render().unwrap().save(std::path::Path::new(&directory).join("affine-rotation-preview.png")).unwrap();
+        }
+        h.drop_at(finish);
+        h.run_steps(3);
+        if clip.is_some()
+            && rotation == 0
+            && let Ok(directory) = std::env::var("PDFCRAFT_AFFINE_SHOTS")
+        {
+            h.render().unwrap().save(std::path::Path::new(&directory).join("affine-rotation-committed.png")).unwrap();
+        }
+        let saved = h.state().session.save_bytes(id).unwrap();
+        let mut reopened = pdfcraft_engine::Session::new();
+        let reopened_id = reopened.open("saved.pdf", None, saved, None).unwrap();
+        let doc = reopened.get(reopened_id).unwrap();
+        let after = doc.page_images(0)[0].clone();
+        let committed = pdfcraft_ui_egui::canvas::ImageObb::from_matrix(after.matrix, &xf, &doc.info, 0).corners();
+        let (cx, cy) = ((visible[0] + visible[2]) * 0.5, (visible[1] + visible[3]) * 0.5);
+        let expected = pdfcraft_content::Matrix(image.matrix).then(&pdfcraft_content::Matrix([0.0, -1.0, 1.0, 0.0, cx - cy, cy + cx])).0;
+        assert!(
+            after.matrix.into_iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3),
+            "knob must commit the requested 90-degree turn around visible bounds"
+        );
+        assert!(
+            preview.iter().zip(committed).all(|(a, b)| a.distance(b) < 1.0),
+            "preview jumped after commit/save: clip={clip:?} rotation={rotation}: {preview:?} != {committed:?}"
+        );
+    }
+}
