@@ -9439,7 +9439,7 @@ fn mirroring_transform_on_added_image_flips_and_non_finite_is_refused() {
 }
 
 #[test]
-fn transform_on_added_image_folds_quarter_turns_and_rejects_non_axis_aligned() {
+fn transform_on_added_image_folds_quarter_turns_and_promotes_non_axis_aligned() {
     let make_png = |rgb: [u8; 3]| {
         let mut png = Vec::new();
         {
@@ -9482,16 +9482,21 @@ fn transform_on_added_image_folds_quarter_turns_and_rejects_non_axis_aligned() {
     assert!((ai2.rect[2] - 200.0).abs() < 1e-4);
     assert!((ai2.rect[3] - 150.0).abs() < 1e-4);
 
-    // 3. Non-axis-aligned transforms (e.g. 45° rotation or skew) are rejected:
+    // Arbitrary transforms promote the added image, just like RotateBy.
+    let initial_matrix = s.get(id).unwrap().page_images(0)[0].matrix;
     let rot_45 = pdfcraft_edit::turn_by_degrees([100.0, 100.0, 200.0, 150.0], 45.0).unwrap();
-    let res_45 = s.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Transform(rot_45) });
-    assert!(res_45.is_err(), "non-axis-aligned 45° rotation must be rejected for added image");
-    assert!(res_45.unwrap_err().to_string().contains("non-axis-aligned"));
-
-    let skew = [1.0, 0.5, 0.0, 1.0, 0.0, 0.0];
-    let res_skew = s.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Transform(skew) });
-    assert!(res_skew.is_err(), "skew must be rejected for added image");
-    assert!(res_skew.unwrap_err().to_string().contains("non-axis-aligned"));
+    s.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Transform(rot_45) }).unwrap();
+    let cos = pdfcraft_cos::Document::open(s.get(id).unwrap().bytes.clone()).unwrap();
+    assert!(pdfcraft_edit::list_added(&cos).is_empty(), "arbitrary transform promotes the image");
+    assert_eq!(s.get(id).unwrap().page_images(0).len(), 1);
+    let expected = pdfcraft_content::Matrix(initial_matrix).then(&pdfcraft_content::Matrix(rot_45)).0;
+    let actual = s.get(id).unwrap().page_images(0)[0].matrix;
+    assert!(actual.into_iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3), "{actual:?} != {expected:?}");
+    s.undo(id).unwrap();
+    let cos = pdfcraft_cos::Document::open(s.get(id).unwrap().bytes.clone()).unwrap();
+    assert_eq!(pdfcraft_edit::list_added(&cos).len(), 1, "undo restores added-image editability");
+    s.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Transform([1.0, 0.5, 0.0, 1.0, 0.0, 0.0]) }).unwrap();
+    assert_eq!(s.get(id).unwrap().page_images(0).len(), 1);
 }
 
 #[test]
@@ -9987,4 +9992,20 @@ fn original_image_edit_does_not_match_an_added_sibling_of_the_same_xobject() {
     let doc = session.get(id).unwrap();
     assert_eq!(doc.added()[0].content, before_added, "matching an original Do must not select the added sibling's metadata");
     assert_eq!(doc.page_images(0)[0].rect, [40.0, 50.0, 140.0, 150.0]);
+}
+
+#[test]
+fn image_transform_engine_refuses_singular_matrices_without_mutation() {
+    let mut png = Vec::new();
+    let mut enc = png::Encoder::new(&mut png, 1, 1);
+    enc.set_color(png::ColorType::Rgb);
+    enc.write_header().unwrap().write_image_data(&[100, 150, 200]).unwrap();
+    let mut s = Session::new();
+    let bytes = s.create_from_images(&[("pixel.png".into(), png)]).unwrap();
+    let id = s.open("image.pdf", None, bytes, None).unwrap();
+    for matrix in [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0 + 1e-12, 0.0, 0.0], [1e308, 0.0, 0.0, 1e308, 0.0, 0.0]] {
+        let before = s.get(id).unwrap().bytes.clone();
+        assert!(s.apply(id, Edit::EditPageImage { page: 0, index: 0, change: ImageEdit::Transform(matrix) }).is_err());
+        assert_eq!(s.get(id).unwrap().bytes, before);
+    }
 }

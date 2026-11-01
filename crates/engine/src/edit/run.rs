@@ -256,8 +256,12 @@ fn run_edit_page_image(doc: &mut pdfcraft_cos::Document, page: usize, index: usi
         ImageEdit::Move(to) if !to.iter().all(|v| v.is_finite()) => {
             return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("invalid position".into())));
         }
-        ImageEdit::Transform(t) if !t.iter().all(|v| v.is_finite()) => {
-            return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("the image transform must be finite".into())));
+        ImageEdit::Transform(t) => {
+            let [a, b, c, d, _, _] = *t;
+            let determinant = a * d - b * c;
+            if !t.iter().all(|v| v.is_finite()) || !determinant.is_finite() || determinant.abs() < 1e-9 {
+                return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("the image transform must be finite and nonsingular".into())));
+            }
         }
         ImageEdit::Crop(keep) if !keep.iter().all(|v| v.is_finite()) => {
             return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("invalid crop".into())));
@@ -326,7 +330,10 @@ fn run_edit_page_image(doc: &mut pdfcraft_cos::Document, page: usize, index: usi
                     || (v[2] - img.rect[2]).abs() > 1e-4
                     || (v[3] - img.rect[3]).abs() > 1e-4
             });
+        let non_axis_transform = matches!(change, ImageEdit::Transform([a, b, c, d, _, _])
+            if !((b.abs() < 1e-5 && c.abs() < 1e-5) || (a.abs() < 1e-5 && d.abs() < 1e-5)));
         let should_promote = has_active_crop
+            || non_axis_transform
             || matches!(change, ImageEdit::Crop(_) | ImageEdit::RemoveCrop | ImageEdit::RotateBy(_) | ImageEdit::Arrange(_) | ImageEdit::Delete);
 
         if should_promote {
