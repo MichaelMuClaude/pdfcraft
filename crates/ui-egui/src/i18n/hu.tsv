@@ -2605,3 +2605,10 @@ animation effects	Off	Ki
 	Options for this reply	A válasz beállításai
 	Export value	Exportérték
 	Show Page Edge Shadows	Oldalszéli árnyékok megjelenítése
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Keresés…
+	Image pasted	Kép beillesztve
+	No image on clipboard to paste	Nincs beilleszthető kép a vágólapon
+	Pinned {tool} to Home	{tool} rögzítve a kezdőlapra
+	Unpinned {tool} from Home	{tool} leválasztva a kezdőlapról

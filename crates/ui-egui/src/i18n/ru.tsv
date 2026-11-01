@@ -2519,3 +2519,10 @@ animation effects	Off	Выкл
 	Options for this reply	Параметры этого ответа
 	Export value	Значение экспорта
 	Show Page Edge Shadows	Показывать тени по краям страниц
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Поиск…
+	Image pasted	Изображение вставлено
+	No image on clipboard to paste	В буфере обмена нет изображения для вставки
+	Pinned {tool} to Home	{tool} закреплён на главной
+	Unpinned {tool} from Home	{tool} откреплён от главной

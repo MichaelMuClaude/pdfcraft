@@ -2866,3 +2866,10 @@ theme	Appearance	Išvaizda
 	Options for this reply	Šio atsakymo parinktys
 	Export value	Eksporto reikšmė
 	Show Page Edge Shadows	Rodyti puslapių kraštų šešėlius
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Ieškoti…
+	Image pasted	Paveikslėlis įklijuotas
+	No image on clipboard to paste	Iškarpinėje nėra paveikslėlio įklijuoti
+	Pinned {tool} to Home	{tool} prisegtas pradžios puslapyje
+	Unpinned {tool} from Home	{tool} atsegtas nuo pradžios puslapio

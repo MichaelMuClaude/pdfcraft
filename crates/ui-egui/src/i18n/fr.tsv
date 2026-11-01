@@ -2871,3 +2871,10 @@ certificate	Version	Version
 	Options for this reply	Options de cette réponse
 	Export value	Valeur d’exportation
 	Show Page Edge Shadows	Afficher les ombres des bords des pages
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Rechercher…
+	Image pasted	Image collée
+	No image on clipboard to paste	Aucune image à coller dans le presse-papiers
+	Pinned {tool} to Home	{tool} épinglé à l’Accueil
+	Unpinned {tool} from Home	{tool} désépinglé de l’Accueil

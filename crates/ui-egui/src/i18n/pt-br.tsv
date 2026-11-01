@@ -2891,3 +2891,10 @@ theme	Appearance	Aparência
 	Options for this reply	Opções desta resposta
 	Export value	Valor de exportação
 	Show Page Edge Shadows	Mostrar sombras nas bordas das páginas
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Pesquisar…
+	Image pasted	Imagem colada
+	No image on clipboard to paste	Nenhuma imagem na área de transferência para colar
+	Pinned {tool} to Home	{tool} fixado no Início
+	Unpinned {tool} from Home	{tool} desafixado do Início

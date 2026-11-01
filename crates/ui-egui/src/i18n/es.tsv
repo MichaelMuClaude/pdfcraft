@@ -2929,3 +2929,10 @@ theme	Appearance	Aspecto
 	Options for this reply	Opciones de esta respuesta
 	Export value	Valor de exportación
 	Show Page Edge Shadows	Mostrar sombras en los bordes de las páginas
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Buscar…
+	Image pasted	Imagen pegada
+	No image on clipboard to paste	No hay ninguna imagen en el portapapeles para pegar
+	Pinned {tool} to Home	{tool} fijado en Inicio
+	Unpinned {tool} from Home	{tool} desfijado de Inicio

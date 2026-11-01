@@ -2873,3 +2873,10 @@ key	Space	Space
 	Options for this reply	Tùy chọn cho câu trả lời này
 	Export value	Giá trị xuất
 	Show Page Edge Shadows	Hiển thị bóng viền trang
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Tìm kiếm…
+	Image pasted	Đã dán hình ảnh
+	No image on clipboard to paste	Không có hình ảnh trong bảng nhớ tạm để dán
+	Pinned {tool} to Home	Đã ghim {tool} vào Trang chủ
+	Unpinned {tool} from Home	Đã bỏ ghim {tool} khỏi Trang chủ

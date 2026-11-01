@@ -2628,3 +2628,10 @@ animation effects	Off	Вимкнено
 	Options for this reply	Параметри цієї відповіді
 	Export value	Значення експорту
 	Show Page Edge Shadows	Показувати тіні на краях сторінок
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Пошук…
+	Image pasted	Зображення вставлено
+	No image on clipboard to paste	У буфері обміну немає зображення для вставлення
+	Pinned {tool} to Home	{tool} закріплено на головній
+	Unpinned {tool} from Home	{tool} відкріплено від головної

@@ -2738,7 +2738,7 @@ certificate	SHA-256 digest	Impronta SHA-256
 	Search tools…	Cerca strumenti…
 	Select tools to display on your Home page for quick access.	Seleziona gli strumenti da visualizzare nella pagina Home per un acceso rapido.
 	Unpin from Home	Rimuovi da Home
-	Unpin tool	Rimuovi strumento
+	Unpin tool	Sblocca strumento dalla Home
 	Transform image	Trasforma immagine
 	Select Tool	Strumento Selezione
 	Hand Tool	Strumento Mano
@@ -2838,3 +2838,10 @@ certificate	SHA-256 digest	Impronta SHA-256
 	Options for this reply	Opzioni per questa risposta
 	Export value	Valore di esportazione
 	Show Page Edge Shadows	Mostra le ombre ai bordi delle pagine
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Cerca…
+	Image pasted	Immagine incollata
+	No image on clipboard to paste	Nessuna immagine negli appunti da incollare
+	Pinned {tool} to Home	{tool} fissato alla Home
+	Unpinned {tool} from Home	{tool} rimosso dai preferiti della Home

@@ -2702,3 +2702,10 @@ animation effects	Off	Wyłączone
 	Options for this reply	Opcje tej odpowiedzi
 	Export value	Wartość eksportowa
 	Show Page Edge Shadows	Pokaż cienie krawędzi stron
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Szukaj…
+	Image pasted	Wklejono obraz
+	No image on clipboard to paste	Brak obrazu do wklejenia w schowku
+	Pinned {tool} to Home	Przypięto {tool} do strony głównej
+	Unpinned {tool} from Home	Odpięto {tool} od strony głównej

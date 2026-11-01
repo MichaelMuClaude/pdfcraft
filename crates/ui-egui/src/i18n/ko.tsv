@@ -2834,3 +2834,10 @@ theme	Appearance	모양
 
 # Comments panel: each reply's own "…" menu (AI-assisted, not separately native-reviewed)
 	Options for this reply	이 답글의 옵션
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	검색…
+	Image pasted	이미지를 붙여넣었습니다
+	No image on clipboard to paste	클립보드에 붙여넣을 이미지가 없습니다
+	Pinned {tool} to Home	{tool}을 홈에 고정했습니다
+	Unpinned {tool} from Home	{tool}의 홈 고정을 해제했습니다

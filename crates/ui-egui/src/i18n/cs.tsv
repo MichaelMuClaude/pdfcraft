@@ -2913,3 +2913,10 @@ certificate	Version	Verze
 	Options for this reply	Možnosti této odpovědi
 	Export value	Exportní hodnota
 	Show Page Edge Shadows	Zobrazovat stíny okrajů stránek
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Hledat…
+	Image pasted	Obrázek vložen
+	No image on clipboard to paste	Ve schránce není obrázek k vložení
+	Pinned {tool} to Home	{tool} připnuto na úvodní stránku
+	Unpinned {tool} from Home	{tool} odepnuto z úvodní stránky

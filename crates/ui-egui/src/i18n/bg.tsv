@@ -2569,3 +2569,10 @@ animation effects	Off	Изключени
 	Options for this reply	Опции за този отговор
 	Export value	Стойност за експортиране
 	Show Page Edge Shadows	Показване на сенки по краищата на страниците
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Търсене…
+	Image pasted	Изображението е поставено
+	No image on clipboard to paste	Няма изображение в клипборда за поставяне
+	Pinned {tool} to Home	{tool} е закачен в Начало
+	Unpinned {tool} from Home	{tool} е откачен от Начало

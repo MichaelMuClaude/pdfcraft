@@ -2524,7 +2524,7 @@ animation effects	Off	Өшірулі
 	Search tools…	Құралдарды іздеу…
 	Select tools to display on your Home page for quick access.	Жылдам қол жеткізу үшін басты бетте көрсетілетін құралдарды таңдаңыз.
 	Unpin from Home	Басты беттен алып тастау
-	Unpin tool	Құралды алып тастау
+	Unpin tool	Құралды бекітуден шығару
 	Transform image	Кескінді түрлендіру
 	Select Tool	Таңдау құралы
 	Hand Tool	Қол құралы
@@ -2604,3 +2604,10 @@ animation effects	Off	Өшірулі
 	Options for this reply	Осы жауаптың параметрлері
 	Export value	Экспорт мәні
 	Show Page Edge Shadows	Бет жиектерінің көлеңкелерін көрсету
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Іздеу…
+	Image pasted	Сурет қойылды
+	No image on clipboard to paste	Алмасу буферінде қоятын сурет жоқ
+	Pinned {tool} to Home	{tool} басты бетке бекітілді
+	Unpinned {tool} from Home	{tool} басты беттен ажыратылды

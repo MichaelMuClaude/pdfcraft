@@ -2881,3 +2881,10 @@ certificate	Version	الإصدار
 	Options for this reply	خيارات هذا الرد
 	Export value	قيمة التصدير
 	Show Page Edge Shadows	إظهار ظلال حواف الصفحات
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	بحث…
+	Image pasted	تم لصق الصورة
+	No image on clipboard to paste	لا توجد صورة في الحافظة للصقها
+	Pinned {tool} to Home	تم تثبيت {tool} في الرئيسية
+	Unpinned {tool} from Home	تم إلغاء تثبيت {tool} من الرئيسية

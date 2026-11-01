@@ -2556,3 +2556,10 @@ animation effects	Off	關
 	Options for this reply	此回覆的選項
 	Export value	匯出值
 	Show Page Edge Shadows	顯示頁面邊緣陰影
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	搜尋…
+	Image pasted	已貼上影像
+	No image on clipboard to paste	剪貼簿中沒有可貼上的影像
+	Pinned {tool} to Home	已將 {tool} 釘選至首頁
+	Unpinned {tool} from Home	已從首頁取消釘選 {tool}

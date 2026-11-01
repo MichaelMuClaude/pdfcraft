@@ -2570,3 +2570,10 @@ animation effects	Off	关
 	Options for this reply	此回复的选项
 	Export value	导出值
 	Show Page Edge Shadows	显示页面边缘阴影
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	搜索…
+	Image pasted	已粘贴图像
+	No image on clipboard to paste	剪贴板中没有可粘贴的图像
+	Pinned {tool} to Home	已将 {tool} 固定到主页
+	Unpinned {tool} from Home	已从主页取消固定 {tool}

@@ -2874,3 +2874,10 @@ theme	Appearance	Teema
 
 # Comments panel: each reply's own "…" menu (AI-assisted, not separately native-reviewed)
 	Options for this reply	Tämän vastauksen asetukset
+
+# Image paste and Home notifications (AI-assisted; not separately native-reviewed)
+	Search…	Hae…
+	Image pasted	Kuva liitetty
+	No image on clipboard to paste	Leikepöydällä ei ole liitettävää kuvaa
+	Pinned {tool} to Home	{tool} kiinnitetty aloitussivulle
+	Unpinned {tool} from Home	{tool} irrotettu aloitussivulta
