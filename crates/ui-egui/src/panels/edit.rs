@@ -281,11 +281,8 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
             Some(paragraphs),
         );
         let mut changed = out.changed;
-        if out.toggle_superscript && crate::edit_text_ui::toggle_superscript(&mut ed) {
-            changed = true;
-        }
-        if out.toggle_subscript && crate::edit_text_ui::toggle_subscript(&mut ed) {
-            changed = true;
+        if let Some(script) = out.script {
+            changed |= crate::edit_text_ui::toggle_script(&mut ed.text, &mut ed.selection, script);
         }
         match out.font {
             Some(FontChoice::KeepSource) => {
@@ -322,36 +319,10 @@ fn format_section(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens) {
         let mut style = draft.style.clone();
         let paragraphs = crate::format_text_ui::Paragraphs { text: &draft.text, selection: draft.selection.clone(), tidy: true };
         let out = added_text_format(ui, t, &mut style, Some(paragraphs));
-        if out.toggle_superscript || out.toggle_subscript {
-            let (s_pos, e_pos) =
-                if let Some(r) = &draft.selection { (r.start.min(draft.text.len()), r.end.min(draft.text.len())) } else { (0, draft.text.len()) };
-            let (start, end) = crate::edit_text_ui::snap_char_boundaries(&draft.text, s_pos, e_pos);
-            if start < end {
-                let target = &draft.text[start..end];
-                let converted: String = if out.toggle_superscript {
-                    let all_sup = target.chars().all(|c| crate::edit_text_ui::char_from_superscript(c) != c);
-                    if all_sup {
-                        target.chars().map(crate::edit_text_ui::char_from_superscript).collect()
-                    } else {
-                        target.chars().map(crate::edit_text_ui::char_to_superscript).collect()
-                    }
-                } else {
-                    let all_sub = target.chars().all(|c| crate::edit_text_ui::char_from_subscript(c) != c);
-                    if all_sub {
-                        target.chars().map(crate::edit_text_ui::char_from_subscript).collect()
-                    } else {
-                        target.chars().map(crate::edit_text_ui::char_to_subscript).collect()
-                    }
-                };
-                if converted != target {
-                    let mut new_draft = draft.clone();
-                    let conv_len = converted.len();
-                    new_draft.text.replace_range(start..end, &converted);
-                    if new_draft.selection.is_some() {
-                        new_draft.selection = Some(start..start + conv_len);
-                    }
-                    app.views[i].content.draft = Some(new_draft);
-                }
+        if let Some(script) = out.script {
+            let mut toggled = draft.clone();
+            if crate::edit_text_ui::toggle_script(&mut toggled.text, &mut toggled.selection, script) {
+                app.views[i].content.draft = Some(toggled);
             }
         }
         if style != draft.style {

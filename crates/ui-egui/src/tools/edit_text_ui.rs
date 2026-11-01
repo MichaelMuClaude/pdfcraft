@@ -46,265 +46,16 @@ enum TextTarget {
 /// hit-testing still covers every image, so nothing becomes unselectable.
 pub(crate) const MAX_OUTLINES: usize = 250;
 
-pub fn char_to_superscript(c: char) -> char {
-    match c {
-        '0' => '⁰',
-        '1' => '¹',
-        '2' => '²',
-        '3' => '³',
-        '4' => '⁴',
-        '5' => '⁵',
-        '6' => '⁶',
-        '7' => '⁷',
-        '8' => '⁸',
-        '9' => '⁹',
-        '+' => '⁺',
-        '-' | '−' => '⁻',
-        '=' => '⁼',
-        '(' => '⁽',
-        ')' => '⁾',
-        'a' => 'ᵃ',
-        'b' => 'ᵇ',
-        'c' => 'ᶜ',
-        'd' => 'ᵈ',
-        'e' => 'ᵉ',
-        'f' => 'ᶠ',
-        'g' => 'ᵍ',
-        'h' => 'ʰ',
-        'i' => 'ⁱ',
-        'j' => 'ʲ',
-        'k' => 'ᵏ',
-        'l' => 'ˡ',
-        'm' => 'ᵐ',
-        'n' => 'ⁿ',
-        'o' => 'ᵒ',
-        'p' => 'ᵖ',
-        'r' => 'ʳ',
-        's' => 'ˢ',
-        't' => 'ᵗ',
-        'u' => 'ᵘ',
-        'v' => 'ᵛ',
-        'w' => 'ʷ',
-        'x' => 'ˣ',
-        'y' => 'ʸ',
-        'z' => 'ᶻ',
-        'A' => 'ᴬ',
-        'B' => 'ᴮ',
-        'D' => 'ᴰ',
-        'E' => 'ᴱ',
-        'G' => 'ᴳ',
-        'H' => 'ᴴ',
-        'I' => 'ᴵ',
-        'J' => 'ᴶ',
-        'K' => 'ᴷ',
-        'L' => 'ᴸ',
-        'M' => 'ᴹ',
-        'N' => 'ᴺ',
-        'O' => 'ᴼ',
-        'P' => 'ᴾ',
-        'R' => 'ᴿ',
-        'T' => 'ᵀ',
-        'U' => 'ᵁ',
-        'V' => 'ⱽ',
-        'W' => 'ᵂ',
-        other => other,
+/// Format text ▸ Superscript or Subscript on `text`: on the `selection` (bytes of `text`), or all
+/// of it without one ([`pdfcraft_engine::text_script::toggle`]). A selection follows the
+/// converted characters. Whether the text changed.
+pub(crate) fn toggle_script(text: &mut String, selection: &mut Option<std::ops::Range<usize>>, script: pdfcraft_engine::text_script::Script) -> bool {
+    let Some((toggled, range)) = pdfcraft_engine::text_script::toggle(text, selection.as_ref(), script) else { return false };
+    *text = toggled;
+    if selection.is_some() {
+        *selection = Some(range);
     }
-}
-
-pub fn char_from_superscript(c: char) -> char {
-    match c {
-        '⁰' => '0',
-        '¹' => '1',
-        '²' => '2',
-        '³' => '3',
-        '⁴' => '4',
-        '⁵' => '5',
-        '⁶' => '6',
-        '⁷' => '7',
-        '⁸' => '8',
-        '⁹' => '9',
-        '⁺' => '+',
-        '⁻' => '-',
-        '⁼' => '=',
-        '⁽' => '(',
-        '⁾' => ')',
-        'ᵃ' => 'a',
-        'ᵇ' => 'b',
-        'ᶜ' => 'c',
-        'ᵈ' => 'd',
-        'ᵉ' => 'e',
-        'ᶠ' => 'f',
-        'ᵍ' => 'g',
-        'ʰ' => 'h',
-        'ⁱ' => 'i',
-        'ʲ' => 'j',
-        'ᵏ' => 'k',
-        'ˡ' => 'l',
-        'ᵐ' => 'm',
-        'ⁿ' => 'n',
-        'ᵒ' => 'o',
-        'ᵖ' => 'p',
-        'ʳ' => 'r',
-        'ˢ' => 's',
-        'ᵗ' => 't',
-        'ᵘ' => 'u',
-        'ᵛ' => 'v',
-        'ʷ' => 'w',
-        'ˣ' => 'x',
-        'ʸ' => 'y',
-        'ᶻ' => 'z',
-        'ᴬ' => 'A',
-        'ᴮ' => 'B',
-        'ᴰ' => 'D',
-        'ᴱ' => 'E',
-        'ᴳ' => 'G',
-        'ᴴ' => 'H',
-        'ᴵ' => 'I',
-        'ᴶ' => 'J',
-        'ᴷ' => 'K',
-        'ᴸ' => 'L',
-        'ᴹ' => 'M',
-        'ᴺ' => 'N',
-        'ᴼ' => 'O',
-        'ᴾ' => 'P',
-        'ᴿ' => 'R',
-        'ᵀ' => 'T',
-        'ᵁ' => 'U',
-        'ⱽ' => 'V',
-        'ᵂ' => 'W',
-        other => other,
-    }
-}
-
-pub fn char_to_subscript(c: char) -> char {
-    match c {
-        '0' => '₀',
-        '1' => '₁',
-        '2' => '₂',
-        '3' => '₃',
-        '4' => '₄',
-        '5' => '₅',
-        '6' => '₆',
-        '7' => '₇',
-        '8' => '₈',
-        '9' => '₉',
-        '+' => '₊',
-        '-' | '−' => '₋',
-        '=' => '₌',
-        '(' => '₍',
-        ')' => '₎',
-        'a' => 'ₐ',
-        'e' => 'ₑ',
-        'h' => 'ₕ',
-        'i' => 'ᵢ',
-        'j' => 'ⱼ',
-        'k' => 'ₖ',
-        'l' => 'ₗ',
-        'm' => 'ₘ',
-        'n' => 'ₙ',
-        'o' => 'ₒ',
-        'p' => 'ₚ',
-        'r' => 'ᵣ',
-        's' => 'ₛ',
-        't' => 'ₜ',
-        'u' => 'ᵤ',
-        'v' => 'ᵥ',
-        'x' => 'ₓ',
-        other => other,
-    }
-}
-
-pub fn char_from_subscript(c: char) -> char {
-    match c {
-        '₀' => '0',
-        '₁' => '1',
-        '₂' => '2',
-        '₃' => '3',
-        '₄' => '4',
-        '₅' => '5',
-        '₆' => '6',
-        '₇' => '7',
-        '₈' => '8',
-        '₉' => '9',
-        '₊' => '+',
-        '₋' => '-',
-        '₌' => '=',
-        '₍' => '(',
-        '₎' => ')',
-        'ₐ' => 'a',
-        'ₑ' => 'e',
-        'ₕ' => 'h',
-        'ᵢ' => 'i',
-        'ⱼ' => 'j',
-        'ₖ' => 'k',
-        'ₗ' => 'l',
-        'ₘ' => 'm',
-        'ₙ' => 'n',
-        'ₒ' => 'o',
-        'ₚ' => 'p',
-        'ᵣ' => 'r',
-        'ₛ' => 's',
-        'ₜ' => 't',
-        'ᵤ' => 'u',
-        'ᵥ' => 'v',
-        'ₓ' => 'x',
-        other => other,
-    }
-}
-
-pub(crate) fn snap_char_boundaries(s: &str, start: usize, end: usize) -> (usize, usize) {
-    let mut s_idx = start.min(s.len());
-    while s_idx > 0 && !s.is_char_boundary(s_idx) {
-        s_idx -= 1;
-    }
-    let mut e_idx = end.min(s.len());
-    while e_idx < s.len() && !s.is_char_boundary(e_idx) {
-        e_idx += 1;
-    }
-    (s_idx, e_idx)
-}
-
-pub fn toggle_superscript(ed: &mut LineEditor) -> bool {
-    let (s_pos, e_pos) = if let Some(r) = &ed.selection { (r.start.min(ed.text.len()), r.end.min(ed.text.len())) } else { (0, ed.text.len()) };
-    let (start, end) = snap_char_boundaries(&ed.text, s_pos, e_pos);
-    if start >= end {
-        return false;
-    }
-    let target = &ed.text[start..end];
-    let all_sup = target.chars().all(|c| char_from_superscript(c) != c);
-    let converted: String =
-        if all_sup { target.chars().map(char_from_superscript).collect() } else { target.chars().map(char_to_superscript).collect() };
-    if converted != target {
-        let conv_len = converted.len();
-        ed.text.replace_range(start..end, &converted);
-        if ed.selection.is_some() {
-            ed.selection = Some(start..start + conv_len);
-        }
-        true
-    } else {
-        false
-    }
-}
-
-pub fn toggle_subscript(ed: &mut LineEditor) -> bool {
-    let (s_pos, e_pos) = if let Some(r) = &ed.selection { (r.start.min(ed.text.len()), r.end.min(ed.text.len())) } else { (0, ed.text.len()) };
-    let (start, end) = snap_char_boundaries(&ed.text, s_pos, e_pos);
-    if start >= end {
-        return false;
-    }
-    let target = &ed.text[start..end];
-    let all_sub = target.chars().all(|c| char_from_subscript(c) != c);
-    let converted: String = if all_sub { target.chars().map(char_from_subscript).collect() } else { target.chars().map(char_to_subscript).collect() };
-    if converted != target {
-        let conv_len = converted.len();
-        ed.text.replace_range(start..end, &converted);
-        if ed.selection.is_some() {
-            ed.selection = Some(start..start + conv_len);
-        }
-        true
-    } else {
-        false
-    }
+    true
 }
 
 /// A paragraph being edited.
@@ -1614,44 +1365,19 @@ C", &picked
 
     #[test]
     fn superscript_and_subscript_conversion() {
-        let mut ed = LineEditor {
-            page: 0,
-            block: 0,
-            text: "E = mc2".to_string(),
-            original: "E = mc2".to_string(),
-            rect: egui::Rect::ZERO,
-            source_rect: [0.0; 4],
-            max_width: 100.0,
-            overflow: false,
-            selection: Some(6..7), // selecting '2'
-            font_resource: None,
-            fonts: std::collections::BTreeMap::new(),
-            source: None,
-            multiline: false,
-            size: 12.0,
-            family_chosen: false,
-            focus: true,
-            had_focus: false,
-            look: pdfcraft_engine::AddedText::default(),
-            look0: pdfcraft_engine::AddedText::default(),
-            extras: Extras::default(),
-            extras0: Extras::default(),
-            typing_from: None,
-        };
+        use pdfcraft_engine::text_script::Script;
+        let (mut text, mut selection) = ("E = mc2".to_string(), Some(6..7));
+        assert!(toggle_script(&mut text, &mut selection, Script::Super));
+        assert_eq!((text.as_str(), selection.clone()), ("E = mc²", Some(6..8)), "the selection follows the converted character");
+        assert!(toggle_script(&mut text, &mut selection, Script::Super));
+        assert_eq!((text.as_str(), selection), ("E = mc2", Some(6..7)));
 
-        assert!(toggle_superscript(&mut ed));
-        assert_eq!(ed.text, "E = mc²");
-        // Toggling superscript again returns to normal '2'
-        assert!(toggle_superscript(&mut ed));
-        assert_eq!(ed.text, "E = mc2");
-
-        // Test subscript on H2O
-        ed.text = "H2O".to_string();
-        ed.selection = Some(1..2); // selecting '2'
-        assert!(toggle_subscript(&mut ed));
-        assert_eq!(ed.text, "H₂O");
-        assert!(toggle_subscript(&mut ed));
-        assert_eq!(ed.text, "H2O");
+        // No selection: the whole text. H and O have no subscript form, and it still toggles back.
+        let (mut text, mut none) = ("H2O".to_string(), None);
+        assert!(toggle_script(&mut text, &mut none, Script::Sub));
+        assert_eq!((text.as_str(), none.clone()), ("H₂O", None));
+        assert!(toggle_script(&mut text, &mut none, Script::Sub));
+        assert_eq!(text, "H2O");
     }
 
     #[test]

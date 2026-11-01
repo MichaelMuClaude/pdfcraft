@@ -9,6 +9,7 @@
 //! The icons are Lucide's (AGENTS.md §1); only the arrangement follows Acrobat.
 
 use egui::{Align, Color32, CornerRadius, Layout, Rect, Sense, Stroke, vec2};
+use pdfcraft_engine::text_script::Script;
 use pdfcraft_engine::{AddedText, FontFamily, TextAlign};
 
 use crate::edit_text_ui::Extras;
@@ -87,8 +88,8 @@ impl Paragraphs<'_> {
 pub(crate) struct Outcome {
     pub changed: bool,
     pub font: Option<FontChoice>,
-    pub toggle_superscript: bool,
-    pub toggle_subscript: bool,
+    /// Superscript or Subscript was clicked, for the selected paragraphs' text.
+    pub script: Option<Script>,
 }
 
 const SIZES: [f64; 16] = [4.0, 6.0, 8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0, 28.0, 36.0, 48.0, 72.0];
@@ -300,30 +301,13 @@ pub(crate) fn panel(
             }
             None => planned(ui, "underline", tl!("Underline")),
         }
-        let (is_super, is_sub) = paragraphs
-            .as_ref()
-            .map(|p| {
-                let (s_pos, e_pos) =
-                    if let Some(r) = &p.selection { (r.start.min(p.text.len()), r.end.min(p.text.len())) } else { (0, p.text.len()) };
-                let (start, end) = crate::edit_text_ui::snap_char_boundaries(p.text, s_pos, e_pos);
-                if start >= end {
-                    return (false, false);
+        if let Some(p) = &paragraphs {
+            for (script, icon, tip) in [(Script::Super, "superscript", tl!("Superscript")), (Script::Sub, "subscript", tl!("Subscript"))] {
+                let on = pdfcraft_engine::text_script::is_in(p.text, p.selection.as_ref(), script);
+                if icons::button(ui, icon, 30.0, on, tip).clicked() {
+                    out.script = Some(script);
+                    out.changed = true;
                 }
-                let target = &p.text[start..end];
-                let all_sup = !target.is_empty() && target.chars().all(|c| crate::edit_text_ui::char_from_superscript(c) != c);
-                let all_sub = !target.is_empty() && target.chars().all(|c| crate::edit_text_ui::char_from_subscript(c) != c);
-                (all_sup, all_sub)
-            })
-            .unwrap_or((false, false));
-
-        if paragraphs.is_some() {
-            if icons::button(ui, "superscript", 30.0, is_super, tl!("Superscript")).clicked() {
-                out.toggle_superscript = true;
-                out.changed = true;
-            }
-            if icons::button(ui, "subscript", 30.0, is_sub, tl!("Subscript")).clicked() {
-                out.toggle_subscript = true;
-                out.changed = true;
             }
         } else {
             planned(ui, "superscript", tl!("Superscript"));
