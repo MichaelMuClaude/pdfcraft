@@ -21,7 +21,7 @@ pub(crate) fn card_lift(ui: &egui::Ui, t: &Tokens, rect: Rect, press: theme::Pre
 }
 
 /// Render a single tool card with the standard lift, styling, icon, title, description, and action.
-/// If `allow_unpin` is true, an unpin button appears on hover in the top right corner.
+/// If `allow_unpin` is true, an unpin button is always accessible in the top right corner.
 fn tool_card(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static catalog::ToolGroup, allow_unpin: bool) -> Option<&'static str> {
     let (rect, resp) = ui.allocate_exact_size(vec2(190.0, 104.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!(g.label)));
@@ -34,7 +34,7 @@ fn tool_card(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static c
     icons::paint(ui, Rect::from_min_size(body.min + vec2(14.0, 14.0), vec2(22.0, 22.0)), g.icon, 21.0, color);
 
     let mut unpin_clicked = false;
-    if allow_unpin && (ui.rect_contains_pointer(rect) || resp.hovered()) {
+    if allow_unpin {
         let unpin_rect = Rect::from_center_size(body.right_top() + vec2(-18.0, 18.0), vec2(22.0, 22.0));
         let unpin_resp = ui.interact(unpin_rect, ui.scope_id().with(("unpin_card_btn", g.id)), Sense::click());
         unpin_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Unpin tool")));
@@ -124,6 +124,9 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
                         for id in RECOMMENDED {
+                            if app.is_tool_pinned(id) {
+                                continue;
+                            }
                             let Some(g) = catalog::group(id) else { continue };
                             tool_card(app, ui, &t, g, false);
                         }
@@ -273,6 +276,41 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn review_home_harness() -> egui_kittest::Harness<'static, PdfCraftApp> {
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+        let mut app = PdfCraftApp::new();
+        app.pinned_tools = vec!["edit".into()];
+        let mut fonts = false;
+        egui_kittest::Harness::builder().with_size(vec2(1500.0, 1200.0)).build_ui_state(
+            move |ui, app| {
+                if !fonts {
+                    ui.ctx().set_fonts(theme::font_definitions());
+                    fonts = true;
+                }
+                show(app, ui);
+            },
+            app,
+        )
+    }
+
+    #[test]
+    fn review_pinned_recommended_tools_appear_once() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = review_home_harness();
+        h.run_steps(3);
+        assert_eq!(h.get_all_by_label("Edit a PDF").count(), 1);
+    }
+
+    #[test]
+    fn review_a_pinned_tool_can_be_unpinned_without_hover() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = review_home_harness();
+        h.run_steps(3);
+        h.get_by_label("Unpin tool").click();
+        h.run_steps(2);
+        assert!(h.state().pinned_tools.is_empty());
+    }
 
     #[test]
     fn translated_card_description_leaves_room_for_the_action() {
