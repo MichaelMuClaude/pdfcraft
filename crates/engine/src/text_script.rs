@@ -4,6 +4,11 @@
 //! The text keeps its font, size and baseline; its characters change to the forms Unicode encodes
 //! for raised and lowered text, so the font must have those glyphs, and extracted text contains
 //! them. Characters Unicode has no such form for are left as they are.
+//!
+//! A selection mixing plain and target-script characters is normalized: `H₂2` becomes `H₂₂`,
+//! then `H22` on the next subscript toggle; superscript follows the same policy. Two toggles
+//! restore uniformly plain or uniformly scripted input, but do not reconstruct an original
+//! mixture. Restoring that exact prior text requires the caller's edit history (Undo).
 
 use std::ops::Range;
 
@@ -150,7 +155,7 @@ fn span(text: &str, range: Option<&Range<usize>>) -> Range<usize> {
 
 /// Whether the characters of `text` in `range` (UTF-8 bytes; all of it when `None`) are already in
 /// `script`: at least one of them is, and none of the others could be. Characters Unicode has no
-/// form for (a space, a `q`) don't count, so toggling text that has some still toggles back.
+/// form for (a space, a `q`) don't count toward that state.
 pub fn is_in(text: &str, range: Option<&Range<usize>>, script: Script) -> bool {
     let target = text.get(span(text, range)).unwrap_or_default();
     target.chars().any(|c| script.plain(c).is_some()) && target.chars().all(|c| script.plain(c).is_some() || script.form(c).is_none())
@@ -160,6 +165,10 @@ pub fn is_in(text: &str, range: Option<&Range<usize>>, script: Script) -> bool {
 /// `None`): back to plain characters when they are already in `script` ([`is_in`]), and otherwise
 /// each character that has a form takes it. Returns the new text and the range the converted
 /// characters now take, or `None` when nothing changes.
+///
+/// Mixed plain/scripted input normalizes to the target script and then to plain text; for
+/// example, `H₂2` → `H₂₂` → `H22`. This stateless conversion does not remember the original
+/// mixture. Use edit history to restore it, rather than treating a second toggle as Undo.
 pub fn toggle(text: &str, range: Option<&Range<usize>>, script: Script) -> Option<(String, Range<usize>)> {
     let span = span(text, range);
     let target = text.get(span.clone()).filter(|t| !t.is_empty())?;
@@ -229,6 +238,22 @@ mod tests {
         // A mixed range takes the form throughout.
         assert_eq!(toggle("H₂2", None, Script::Sub).unwrap().0, "H₂₂");
         assert!(!is_in("H₂2", None, Script::Sub));
+    }
+
+    #[test]
+    fn mixed_plain_and_scripted_text_normalizes_instead_of_round_tripping() {
+        for (script, mixed, uniform, plain) in [(Script::Super, "Q²2", "Q²²", "Q22"), (Script::Sub, "H₂2", "H₂₂", "H22")] {
+            assert!(!is_in(mixed, None, script));
+            let (once, range) = toggle(mixed, None, script).unwrap();
+            assert_eq!(once, uniform);
+            assert_eq!(range, 0..uniform.len());
+            assert!(is_in(&once, None, script));
+            let (twice, range) = toggle(&once, None, script).unwrap();
+            assert_eq!(twice, plain);
+            assert_eq!(range, 0..plain.len());
+            assert_ne!(twice, mixed, "a second toggle normalizes the original mixture");
+            assert_eq!(toggle(&twice, None, script).unwrap().0, uniform);
+        }
     }
 
     #[test]

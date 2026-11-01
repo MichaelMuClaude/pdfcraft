@@ -1974,8 +1974,10 @@ evidence = [
   "crates/ui-egui/src/tools/edit_text_ui.rs::superscript_and_subscript_conversion",
   "crates/ui-egui/tests/it/editing.rs::the_format_panel_toggles_superscript_and_subscript_on_selection",
   "crates/automation/tests/it/automation.rs::superscript_and_subscript_through_tools",
+  "crates/engine/src/text_script.rs::mixed_plain_and_scripted_text_normalizes_instead_of_round_tripping",
+  "crates/automation/tests/it/automation.rs::mixed_script_tools_normalize_but_undo_restores_the_exact_mixture",
 ]
-notes = "Toggled in the Format text panel for the selection, and headlessly with text_script on a paragraph or a byte range of it; each toggle of a paragraph is one undo step. Uses Unicode superscript and subscript forms (2 ↔ ²) rather than text rise (Ts) and font scaling, so the font must provide the corresponding glyphs and extracted text contains the Unicode characters. Characters Unicode has no form for (q, most capitals in subscript) stay as they are and don't stop a toggle back; the mathematical minus sign U+2212 has a reversible form, while ASCII hyphen-minus stays unchanged."
+notes = "Toggled in the Format text panel for the selection, and headlessly with text_script on a paragraph or a byte range of it; each toggle of a paragraph is one undo step. Uses Unicode superscript and subscript forms (2 ↔ ²) rather than text rise (Ts) and font scaling, so the font must provide the corresponding glyphs and extracted text contains the Unicode characters. Characters Unicode has no form for (q, most capitals in subscript) stay unchanged and do not determine script state. Two toggles restore uniformly plain or uniformly scripted inputs. Mixed input normalizes (H₂2 → H₂₂ → H22), so a second toggle does not recover the original mixture; Undo restores the exact prior text. The mathematical minus sign U+2212 has its own script mapping, while ASCII hyphen-minus stays unchanged."
 
 [[feature]]
 id = "edit.paragraph-alignment"

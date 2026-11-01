@@ -10417,3 +10417,41 @@ fn image_flip_tools_follow_displayed_axes_on_every_page_rotation() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn mixed_script_tools_normalize_but_undo_restores_the_exact_mixture() {
+    let dir = workdir("mixed-script-policy");
+    let mut a = auto(&dir);
+    for (script, mixed, uniform, plain) in [("superscript", "Q²2", "Q²²", "Q22"), ("subscript", "H₂2", "H₂₂", "H22")] {
+        let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+        ok(&mut a, "text_edit", json!({"doc":doc,"page":1,"paragraph":1,"text":mixed,"size":14,"width":160}));
+        let paragraph =
+            |a: &mut Automation| ok(a, "text_paragraphs", json!({"doc":doc,"page":1}))["paragraphs"][0]["editor_text"].as_str().unwrap().to_owned();
+        assert_eq!(paragraph(&mut a), mixed);
+        let before = a.session().get(pdfcraft_engine::DocId(doc)).unwrap().bytes.clone();
+        let args = json!({"doc":doc,"page":1,"paragraph":1,"script":script});
+        let once = ok(&mut a, "text_script", args.clone());
+        assert_eq!(once["paragraph"]["text"], uniform);
+        assert_eq!(paragraph(&mut a), uniform);
+        ok(&mut a, "text_script", args);
+        assert_eq!(paragraph(&mut a), plain);
+        assert_ne!(plain, mixed, "normalization does not promise to recreate the original mixture");
+        ok(&mut a, "edit_undo", json!({"doc":doc}));
+        assert_eq!(paragraph(&mut a), uniform, "one Undo restores the preceding scripted text");
+        ok(&mut a, "edit_undo", json!({"doc":doc}));
+        assert_eq!(paragraph(&mut a), mixed, "Undo restores the exact initial Unicode mixture");
+        assert_eq!(
+            a.session().get(pdfcraft_engine::DocId(doc)).unwrap().bytes.as_ref(),
+            before.as_ref(),
+            "Undo also restores the exact prior document bytes"
+        );
+        ok(&mut a, "edit_redo", json!({"doc":doc}));
+        assert_eq!(paragraph(&mut a), uniform);
+        ok(&mut a, "edit_redo", json!({"doc":doc}));
+        assert_eq!(paragraph(&mut a), plain);
+        let path = format!("mixed-{script}.pdf");
+        ok(&mut a, "doc_save", json!({"doc":doc,"path":path}));
+        let reopened = ok(&mut a, "doc_open", json!({"path":path}))["doc"].as_u64().unwrap();
+        assert_eq!(page_text(&mut a, reopened)[0], plain);
+    }
+}
