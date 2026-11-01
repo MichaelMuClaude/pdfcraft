@@ -4260,6 +4260,34 @@ fn a_draw_turns_about_the_anchor_it_names() {
     assert!((from.0 - (anchor.0 - 28.8)).abs() < 0.01 && (from.1 - (anchor.1 - 50.4)).abs() < 0.01, "{from:?}");
 }
 
+/// Each of the nine anchors stays where it is, and the box goes round it at each turn. What is
+/// asked for comes from the box's corners here, not from layout: from the anchor, y up, the line
+/// runs from the top left to the bottom right, and a quarter turn takes (x, y) to (-y, x).
+#[test]
+fn a_draw_turns_about_each_of_the_nine_anchors() {
+    let (w, h) = (50.4, 28.8);
+    let anchor = (18.0 + 216.0, 792.0 - 18.0 - 72.0);
+    for (name, down) in [("top", 0.0), ("middle", 0.5), ("bottom", 1.0)] {
+        for (side, across) in [("Left", 0.0), ("Center", 0.5), ("Right", 1.0)] {
+            for quarters in 0..4 {
+                let rotate = quarters * 90;
+                let draw = format!(
+                    r#"<draw x="3in" y="1in" w="0.7in" h="0.4in" anchorType="{name}{side}" rotate="{rotate}"><value><line><edge thickness="1pt"/></line></value></draw>"#
+                );
+                let (doc, page) = written(&form_of_draws("", &draw));
+                let lines = stroked_lines(&page_content(&doc, &page));
+                assert_eq!(lines.len(), 1, "{name}{side} at {rotate}: {lines:?}");
+                let (left, top) = (-across * w, down * h);
+                for (got, corner) in lines[0].iter().zip([(left, top), (left + w, top - h)]) {
+                    let turned = (0..quarters).fold(corner, |(x, y), _| (-y, x));
+                    let want = (anchor.0 + turned.0, anchor.1 + turned.1);
+                    assert!((got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01, "{name}{side} at {rotate}: {got:?} for {want:?}");
+                }
+            }
+        }
+    }
+}
+
 /// Everything a draw shows turns with it, under one matrix: its text, its picture and its border,
 /// rounded or not, each written as if it stood upright.
 #[test]
