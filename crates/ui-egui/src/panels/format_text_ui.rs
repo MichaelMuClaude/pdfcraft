@@ -465,8 +465,10 @@ fn font_size_input(ui: &mut egui::Ui, size: &mut f64, mixed: bool) -> bool {
         let initial_text = || {
             if mixed || *size <= 0.0 { tl!("Mixed").to_string() } else { size.to_string() }
         };
-        let (previous, mut text) = ui.data(|d| d.get_temp::<(u64, String)>(id)).unwrap_or_else(|| (size.to_bits(), initial_text()));
-        if previous != size.to_bits() {
+        // A selection can become mixed without changing its representative numeric size.
+        let (previous, previous_mixed, mut text) =
+            ui.data(|d| d.get_temp::<(u64, bool, String)>(id)).unwrap_or_else(|| (size.to_bits(), mixed, initial_text()));
+        if previous != size.to_bits() || previous_mixed != mixed {
             text = initial_text();
         }
         let field = egui::TextEdit::singleline(&mut text).id(id).desired_width(40.0);
@@ -502,7 +504,7 @@ fn font_size_input(ui: &mut egui::Ui, size: &mut f64, mixed: bool) -> bool {
         if *size != before {
             text = size.to_string();
         }
-        ui.data_mut(|d| d.insert_temp(id, (size.to_bits(), text)));
+        ui.data_mut(|d| d.insert_temp(id, (size.to_bits(), mixed, text)));
     });
     committed
 }
@@ -537,6 +539,50 @@ mod typed_size_tests {
         for value in ["", "0", "-1", "0.5", "501", "NaN", "inf", "1e999", "small"] {
             assert_eq!(typed_font_size(value), None, "{value}");
         }
+    }
+
+    #[test]
+    fn mixed_size_changes_refresh_the_field_without_discarding_a_draft() {
+        let mut h = egui_kittest::Harness::new_ui_state(
+            |ui, state: &mut (f64, bool, usize)| {
+                if font_size_input(ui, &mut state.0, state.1) {
+                    state.1 = false;
+                    state.2 += 1;
+                }
+            },
+            (12.0, false, 0),
+        );
+        h.run();
+        let field =
+            |h: &egui_kittest::Harness<'_, (f64, bool, usize)>| h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Font size:").value();
+        assert_eq!(field(&h).as_deref(), Some("12"));
+        h.state_mut().0 = 24.0;
+        h.run_steps(2);
+        assert_eq!(field(&h).as_deref(), Some("24"), "the heading selection updates the size");
+        h.state_mut().1 = true;
+        h.run_steps(2);
+        assert_eq!(field(&h).as_deref(), Some("Mixed"), "collapsing to a mixed block must refresh even when its representative size stays 24");
+        if let Ok(path) = std::env::var("PDFCRAFT_MIXED_SIZE_SHOT") {
+            h.render().unwrap().save(path).unwrap();
+        }
+        h.state_mut().1 = false;
+        h.run_steps(2);
+        assert_eq!(field(&h).as_deref(), Some("24"), "selecting the heading again clears Mixed without a numeric change");
+        h.state_mut().1 = true;
+        h.run_steps(2);
+        h.get_by_role_and_label(egui::accesskit::Role::TextInput, "Font size:").click();
+        h.run();
+        h.event(egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+        h.event(egui::Event::Text("1".into()));
+        h.run_steps(3);
+        assert_eq!(field(&h).as_deref(), Some("1"), "an unchanged mixed style must preserve the draft");
+        h.event(egui::Event::Text("8".into()));
+        h.run_steps(3);
+        assert_eq!(field(&h).as_deref(), Some("18"));
+        assert_eq!(*h.state(), (24.0, true, 0), "typing does not apply a formatting change");
+        h.event(egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(2);
+        assert_eq!(*h.state(), (18.0, false, 1));
     }
 
     #[test]
