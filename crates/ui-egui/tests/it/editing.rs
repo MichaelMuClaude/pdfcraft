@@ -9365,3 +9365,42 @@ fn outward_image_grip_drags_grow_on_rotated_pages() {
         }
     }
 }
+
+#[test]
+fn author_image_clip_is_not_offered_as_a_removable_editor_crop() {
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 1100.0)).build_eframe(|_cc| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("author-clip.pdf", None, clipped_artwork_with_labels()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    assert!(h.state_mut().execute("edit.edit_text"));
+    h.state_mut().views[0].image_selection = Some(pdfcraft_ui_egui::ImageSelection::at(0, 0));
+    h.run_steps(3);
+    let view = &h.state().views[0];
+    let doc = h.state().session.get(view.id).unwrap();
+    let image = doc.page_images(0)[0].clone();
+    let visible = image.visible_rect.unwrap();
+    let xf = view.page_xform(0).unwrap();
+    let bounds = pdfcraft_ui_egui::canvas::image_screen_rect(&image, &xf, &doc.info, 0);
+    let p = bounds.center();
+    h.hover_at(p);
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed: false, modifiers: Default::default() });
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Remove crop").next().is_none(), "author clips are not editor crops");
+    h.get_by_label("Crop").click();
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Remove Crop").next().is_none(), "the initial author clip has no removable draft crop");
+    let mut draft = visible;
+    draft[0] += (draft[2] - draft[0]) * 0.2;
+    h.state_mut().views[0].image_selection.as_mut().unwrap().crop.as_mut().unwrap().keep = draft;
+    h.run_steps(3);
+    h.get_by_label("Remove Crop").click();
+    h.run_steps(1);
+    assert_eq!(h.state().views[0].image_selection.as_ref().unwrap().crop.as_ref().unwrap().keep, visible, "draft reset preserves the author's clip");
+    h.get_by_label("Done").click();
+    h.run_steps(2);
+    assert_eq!(h.state().session.get(h.state().views[0].id).unwrap().page_images(0)[0].visible_rect, Some(visible));
+}

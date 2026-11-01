@@ -286,8 +286,8 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     let font = egui::FontId::proportional(12.5);
     let done_w = painter.layout_no_wrap(tl!("Done").to_string(), font.clone(), Color32::WHITE).size().x + 22.0;
     let cancel_w = painter.layout_no_wrap(tl!("Cancel").to_string(), font.clone(), Color32::WHITE).size().x + 22.0;
-    let is_full_rect = same_rect(mode.keep, image.rect);
-    let has_crop = !is_full_rect || image.visible_rect.is_some_and(|v| v != image.rect);
+    let initial_keep = image.visible_rect.unwrap_or(image.rect);
+    let has_crop = image.has_editor_crop() || !same_rect(mode.keep, initial_keep);
     let reset_w =
         if has_crop { Some(painter.layout_no_wrap(tl!("Remove Crop").to_string(), font.clone(), Color32::WHITE).size().x + 22.0) } else { None };
     let spacing = 6.0;
@@ -319,6 +319,12 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
     let done_resp = ui.interact(done, done_id, egui::Sense::click());
     let cancel_resp = ui.interact(cancel, cancel_id, egui::Sense::click());
     let reset_resp = reset.map(|r| ui.interact(r, reset_id, egui::Sense::click()));
+    done_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, allow_interaction, tl!("Done")));
+    cancel_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, allow_interaction, tl!("Cancel")));
+    if let Some(response) = &reset_resp {
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, allow_interaction, tl!("Remove Crop")));
+    }
+
     let t = crate::theme::Tokens::get(ui.ctx());
 
     // Done button (accent colored)
@@ -377,7 +383,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
             .is_some_and(|r| reset_resp.as_ref().is_some_and(|res| res.clicked()) || (resp.clicked() && hover_pos.is_some_and(|p| r.contains(p))));
 
     if reset_clicked {
-        mode.keep = image.rect;
+        mode.keep = if image.has_editor_crop() { image.rect } else { initial_keep };
         mode.drag = None;
     } else if done_clicked || keys(egui::Key::Enter) {
         let keep = mode.keep;
@@ -386,7 +392,7 @@ fn crop_input(cx: &ImageCx<'_>, view: &mut DocView, i: usize, image: &pdfcraft_e
         }
         let is_full = same_rect(keep, image.rect);
         if is_full {
-            if image.visible_rect.is_some_and(|v| v != image.rect) {
+            if image.has_editor_crop() {
                 view.pending_edit = Some(Edit::EditPageImage { page, index: i, change: pdfcraft_engine::ImageEdit::RemoveCrop });
             }
         } else if image.visible_rect != Some(keep) {
@@ -1018,8 +1024,7 @@ pub(crate) fn image_context_menu(
 
     ui.separator();
 
-    let is_cropped = img.visible_rect.is_some() && img.visible_rect != Some(img.rect);
-    if raster && item(ui, is_cropped, tl!("Remove crop")) {
+    if raster && img.has_editor_crop() && item(ui, true, tl!("Remove crop")) {
         view.pending_edit = edit(E::RemoveCrop);
     }
     if item(ui, true, tl!("Flip horizontal")) {
